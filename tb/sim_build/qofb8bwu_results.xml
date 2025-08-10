@@ -1,0 +1,8 @@
+<testsuites name="results">
+  <testsuite name="all" package="all">
+    <property name="random_seed" value="1752152225" />
+    <testcase name="test_pruner_prefix_selection" classname="test_pruner" file="/Users/lazybanana/github/snn_prosperity/tb/test_pruner.py" lineno="174" time="0.6831932067871094" sim_time_ns="20500.001" ratio_time="30006.154622652783">
+      <failure message="Test failed with RANDOM_SEED=1752152225" />
+    </testcase>
+  </testsuite>
+</testsuites>

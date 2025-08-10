@@ -1,0 +1,11 @@
+<testsuites name="results">
+  <testsuite name="all" package="all">
+    <property name="random_seed" value="1752461791" />
+    <testcase name="test_detector_complex_patterns" classname="test_detector" file="/Users/lazybanana/github/snn_prosperity/tb/test_detector.py" lineno="179" time="0.010275125503540039" sim_time_ns="5180.001" ratio_time="504130.19268867903">
+      <failure message="Test failed with RANDOM_SEED=1752461791" />
+    </testcase>
+    <testcase name="detector_subset_index_test" classname="test_detector" file="/Users/lazybanana/github/snn_prosperity/tb/test_detector.py" lineno="224" time="0.01198887825012207" sim_time_ns="5660.001" ratio_time="472104.3021637467">
+      <failure message="Test failed with RANDOM_SEED=1752461791" />
+    </testcase>
+  </testsuite>
+</testsuites>

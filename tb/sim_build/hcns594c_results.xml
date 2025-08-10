@@ -1,0 +1,11 @@
+<testsuites name="results">
+  <testsuite name="all" package="all">
+    <property name="random_seed" value="1752162458" />
+    <testcase name="test_ppu_pipeline_full" classname="test_top" file="/Users/lazybanana/github/snn_prosperity/tb/test_top.py" lineno="29" time="0.020309925079345703" sim_time_ns="5510.001" ratio_time="271295.9786150776">
+      <failure message="Test failed with RANDOM_SEED=1752162458" />
+    </testcase>
+    <testcase name="test_ppu_pipeline_small" classname="test_top" file="/Users/lazybanana/github/snn_prosperity/tb/test_top.py" lineno="125" time="0.0012669563293457031" sim_time_ns="360.0010000000002" ratio_time="284146.3369032745">
+      <failure message="Test failed with RANDOM_SEED=1752162458" />
+    </testcase>
+  </testsuite>
+</testsuites>
