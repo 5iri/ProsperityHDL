@@ -1,8 +1,0 @@
-<testsuites name="results">
-  <testsuite name="all" package="all">
-    <property name="random_seed" value="1752226740" />
-    <testcase name="test_ppu_evaluation" classname="test_top" file="/Users/lazybanana/github/snn_prosperity/tb/test_top.py" lineno="93" time="0.38486719131469727" sim_time_ns="43400.001" ratio_time="112766.17487644663">
-      <failure message="Test failed with RANDOM_SEED=1752226740" />
-    </testcase>
-  </testsuite>
-</testsuites>

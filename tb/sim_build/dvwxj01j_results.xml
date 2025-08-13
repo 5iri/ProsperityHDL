@@ -1,7 +1,0 @@
-<testsuites name="results">
-  <testsuite name="all" package="all">
-    <property name="random_seed" value="1752158678" />
-    <testcase name="test_dispatcher_prosparsity" classname="test_dispatcher" file="/Users/lazybanana/github/snn_prosperity/tb/test_dispatcher.py" lineno="60" time="0.02848219871520996" sim_time_ns="12670.001" ratio_time="444839.2881001147" />
-    <testcase name="test_dispatcher_small" classname="test_dispatcher" file="/Users/lazybanana/github/snn_prosperity/tb/test_dispatcher.py" lineno="183" time="0.0009763240814208984" sim_time_ns="400.0010000000002" ratio_time="409701.04867008567" />
-  </testsuite>
-</testsuites>

@@ -193,6 +193,7 @@ def test_ppu():
         repo / "ppu" / "detector.v",
         repo / "ppu" / "pruner.v",
         repo / "ppu" / "dispatcher.v",
+        repo / "ppu" / "processor.v",
         repo / "ppu" / "tcam" / "hdl" / "tcam_line_array.v",
         repo / "ppu" / "tcam" / "hdl" / "tcam_line_encoder.v",
         repo / "ppu" / "tcam" / "hdl" / "tcam_sdpram.v",

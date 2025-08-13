@@ -1,6 +1,0 @@
-<testsuites name="results">
-  <testsuite name="all" package="all">
-    <property name="random_seed" value="1752225708" />
-    <testcase name="detector_subset_index_test" classname="test_detector" file="/Users/lazybanana/github/snn_prosperity/tb/test_detector.py" lineno="79" time="0.031845808029174805" sim_time_ns="8790.001" ratio_time="276017.52142533934" />
-  </testsuite>
-</testsuites>

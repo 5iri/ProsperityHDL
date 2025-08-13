@@ -103,38 +103,6 @@ module detector #(
       .line_match(tcam_matches)
   );
 
-  // ── Parallel Population count function ─────────────────────────────────────
-  function [NO_WIDTH-1:0] calc_popcount;
-    input [SPIKES-1:0] data;
-    reg [NO_WIDTH-1:0] stage1[SPIKES/2-1:0];
-    reg [NO_WIDTH-1:0] stage2[SPIKES/4-1:0];
-    reg [NO_WIDTH-1:0] stage3[SPIKES/8-1:0];
-    reg [NO_WIDTH-1:0] stage4[SPIKES/16-1:0];
-    integer i;
-    begin
-      // Stage 1: Count pairs
-      for (i = 0; i < SPIKES / 2; i = i + 1) begin
-        stage1[i] = data[2*i] + data[2*i+1];
-      end
-
-      // Stage 2: Combine pairs
-      for (i = 0; i < SPIKES / 4; i = i + 1) begin
-        stage2[i] = stage1[2*i] + stage1[2*i+1];
-      end
-
-      // Stage 3: Combine quads
-      for (i = 0; i < SPIKES / 8; i = i + 1) begin
-        stage3[i] = stage2[2*i] + stage2[2*i+1];
-      end
-
-      // Stage 4: Final combination
-      for (i = 0; i < SPIKES / 16; i = i + 1) begin
-        stage4[i] = stage3[2*i] + stage3[2*i+1];
-      end
-
-      calc_popcount = stage4[0];
-    end
-  endfunction
 
   // ── Next state logic ─────────────────────────────────────────────
   always @(*) begin

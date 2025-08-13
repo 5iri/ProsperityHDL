@@ -4,7 +4,7 @@
 # Execute this makefile from the object directory:
 #    make -f Vtop.mk
 
-default: dispatcher
+default: top
 
 ### Constants...
 # Perl executable (from $PERL, defaults to 'perl' if not set)
@@ -40,7 +40,7 @@ VM_USER_CFLAGS = \
 
 # User LDLIBS (from -LDFLAGS on Verilator command line)
 VM_USER_LDLIBS = \
-  -Wl,-rpath,/Users/lazybanana/github/snn_prosperity/.venv/lib/python3.13/site-packages/cocotb/libs -L/Users/lazybanana/github/snn_prosperity/.venv/lib/python3.13/site-packages/cocotb/libs -lcocotbvpi_verilator \
+  -Wl,-rpath,/Users/lazybanana/github/prosperityHDL/.venv/lib/python3.13/site-packages/cocotb/libs -L/Users/lazybanana/github/prosperityHDL/.venv/lib/python3.13/site-packages/cocotb/libs -lcocotbvpi_verilator \
   -lz \
 
 # User .cpp files (from .cpp's on Verilator command line)
@@ -61,11 +61,11 @@ include $(VERILATOR_ROOT)/include/verilated.mk
 ### Executable rules... (from --exe)
 VPATH += $(VM_USER_DIR)
 
-verilator.o: /Users/lazybanana/github/snn_prosperity/.venv/lib/python3.13/site-packages/cocotb/share/lib/verilator/verilator.cpp 
+verilator.o: /Users/lazybanana/github/prosperityHDL/.venv/lib/python3.13/site-packages/cocotb/share/lib/verilator/verilator.cpp 
 	$(OBJCACHE) $(CXX) $(CXXFLAGS) $(CPPFLAGS) $(OPT_FAST)  -c -o $@ $<
 
 ### Link rules... (from --exe)
-dispatcher: $(VK_USER_OBJS) $(VK_GLOBAL_OBJS) $(VM_PREFIX)__ALL.a $(VM_HIER_LIBS)
+top: $(VK_USER_OBJS) $(VK_GLOBAL_OBJS) $(VM_PREFIX)__ALL.a $(VM_HIER_LIBS)
 	$(LINK) $(LDFLAGS) $^ $(LOADLIBES) $(LDLIBS) $(LIBS) $(SC_LIBS) -o $@
 
 # Verilated -*- Makefile -*-

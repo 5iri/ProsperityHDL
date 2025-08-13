@@ -15,9 +15,12 @@
 `timescale 1ns / 1ps
 
 module top #(
-    parameter ROWS     = 256,     // Maximum number of rows per tile
-    parameter SPIKES   = 16,      // Number of spikes per pattern
-    parameter NO_WIDTH = 8        // Width of number-of-ones counter (log2(SPIKES)+1)
+    parameter ROWS         = 256,     // Maximum number of rows per tile
+    parameter SPIKES       = 16,      // Number of spikes per pattern
+    parameter NO_WIDTH     = 8,       // Width of number-of-ones counter (log2(SPIKES)+1)
+    parameter PE_COUNT     = 128,     // Number of Processing Elements
+    parameter WEIGHT_WIDTH = 8,       // Weight precision
+    parameter ACC_WIDTH    = 16       // Accumulator width
 ) (
     // Clock and Reset
     input  wire clk,
@@ -45,18 +48,31 @@ module top #(
     output reg [NO_WIDTH-1:0]     pc_mem_data_out,
     input  wire                    pc_mem_wr_en,
     
-    // Task Interface to Compute Core
-    input  wire                    core_ready,    // Core ready for next task
+    // Task Interface to Compute Core (internal connection to processor)
     output wire                    task_valid,    // Valid task data
     output wire [$clog2(ROWS)-1:0] task_row_id,   // Current row ID
     output wire [$clog2(ROWS)-1:0] task_prefix_id, // Prefix row ID
     output wire [SPIKES-1:0]       task_pattern,   // Spike pattern
     
+    // Weight Memory Interface (for 128 PEs)
+    output wire [$clog2(SPIKES)-1:0] weight_addr,
+    input  wire [PE_COUNT*WEIGHT_WIDTH-1:0] weight_data,
+    output wire                      weight_rd_en,
+    
+    // Output Buffer Interface
+    output wire [$clog2(ROWS)-1:0]   output_rd_addr,
+    output wire [$clog2(ROWS)-1:0]   output_wr_addr,
+    input  wire [PE_COUNT*ACC_WIDTH-1:0] output_rd_data,
+    output wire [PE_COUNT*ACC_WIDTH-1:0] output_wr_data,
+    output wire                       output_wr_en,
+    
     // Debug Signals
     output wire [3:0]              dbg_state,      // Debug: FSM state
     output wire                    dbg_det_ready,  // Debug: Detector ready
     output wire                    dbg_prn_ready,  // Debug: Pruner ready
-    output wire                    dbg_dsp_ready   // Debug: Dispatcher ready
+    output wire                    dbg_dsp_ready,  // Debug: Dispatcher ready
+  output wire                    dbg_proc_busy,  // Debug: Processor busy
+  output wire                    core_ready      // Core ready signal for testbench
 );
 
   // ===================================================================
@@ -259,7 +275,7 @@ module top #(
     .prune_valid(prn_valid),
     .prune_done(prune_done),
     .mem_NO_out(prn_popcnt),
-    .mem_spike_out() ,
+    .mem_spike_out(/* unused */),
     .dispatch_ready(dsp_ready),
     
     // Memory interface – multiplex spike vs NO writes
@@ -366,9 +382,62 @@ module top #(
   );
   // Only one dispatcher instance above. Any other instance below this comment will be removed.
   
+  // ===================================================================
+  // Processor Interface (128 PEs)
+  // ===================================================================
+  wire proc_ready;
+  wire proc_busy;
+  wire proc_done;
+  
+  // Processor instance
+  processor #(
+    .ROWS(ROWS),
+    .SPIKES(SPIKES),
+    .PE_COUNT(PE_COUNT),
+    .WEIGHT_WIDTH(WEIGHT_WIDTH),
+    .ACC_WIDTH(ACC_WIDTH),
+    .NO_WIDTH(NO_WIDTH)
+  ) u_processor (
+    .clk(clk),
+    .rst_n(rst_n),
+    
+    // Task Interface from Dispatcher
+    .task_valid(task_valid),
+    .task_ready(proc_ready),
+    .task_row_id(task_row_id),
+    .task_prefix_id(task_prefix_id),
+    .task_pattern(task_pattern),
+    
+    // Weight Memory Interface
+    .weight_addr(weight_addr),
+    .weight_data(weight_data),
+    .weight_rd_en(weight_rd_en),
+    
+    // Output Buffer Interface
+    .output_rd_addr(output_rd_addr),
+    .output_wr_addr(output_wr_addr),
+    .output_rd_data(output_rd_data),
+    .output_wr_data(output_wr_data),
+    .output_wr_en(output_wr_en),
+    
+    // Status
+    .proc_busy(proc_busy),
+    .proc_done(proc_done)
+  );
+  
+  // Connect processor ready signal to dispatcher
+  assign core_ready = proc_ready;
+  
   // Status outputs
   assign tile_done = dsp_tile_done;
   assign ppu_ready = (state == ST_IDLE) || (state == ST_DONE);
+
+  // Debug outputs
+  assign dbg_state = state;
+  assign dbg_det_ready = det_q_ready;
+  assign dbg_prn_ready = prn_ready;
+  assign dbg_dsp_ready = dsp_ready;
+  assign dbg_proc_busy = proc_busy;
 
   // ─────────────────── Single-port RAM interface for tile_data ---------
   always @(posedge clk) begin

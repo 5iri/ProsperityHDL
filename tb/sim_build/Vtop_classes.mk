@@ -12,7 +12,7 @@ VM_TIMING = 0
 # Coverage output mode?  0/1 (from --coverage)
 VM_COVERAGE = 0
 # Parallel builds?  0/1 (from --output-split)
-VM_PARALLEL_BUILDS = 0
+VM_PARALLEL_BUILDS = 1
 # Tracing output mode?  0/1 (from --trace-fst/--trace-saif/--trace-vcd)
 VM_TRACE = 1
 # Tracing output mode in FST format?  0/1 (from --trace-fst)
@@ -28,9 +28,12 @@ VM_CLASSES_FAST += \
   Vtop \
   Vtop___024root__DepSet_h4b98a05d__0 \
   Vtop___024root__DepSet_h6944321b__0 \
+  Vtop___024root__DepSet_h6944321b__1 \
+  Vtop___024root__DepSet_h6944321b__2 \
 
 # Generated module classes, non-fast-path, compile with low/medium optimization
 VM_CLASSES_SLOW += \
+  Vtop__ConstPool_0 \
   Vtop___024root__Slow \
   Vtop___024root__DepSet_h4b98a05d__0__Slow \
   Vtop___024root__DepSet_h6944321b__0__Slow \

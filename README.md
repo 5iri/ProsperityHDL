@@ -10,6 +10,7 @@ This repository implements the **Prosperity PPU**—a hardware accelerator for s
   - **TCAM-based Detector:** Fast, parallel detection of prefix relationships.
   - **Pruner:** Selects the best prefix for each row and computes the suffix mask.
   - **Dispatcher:** Sorts and issues rows in dependency-safe order (prefix before suffix).
+  - **128-PE Processor:** Parallel computation array with 8-bit weights and 16-bit accumulators.
   - **Single-port RAM Interface:** For loading spike tiles from the host.
 
 ## File Structure
@@ -18,6 +19,7 @@ This repository implements the **Prosperity PPU**—a hardware accelerator for s
 - `ppu/detector.v`    — TCAM-based prefix detector
 - `ppu/pruner.v`      — Prefix selection and suffix mask computation
 - `ppu/dispatcher.v`  — Sorting and dispatch logic
+- `ppu/processor.v`   — 128-PE array for matrix computation
 - `ppu/tcam/hdl/`     — TCAM hardware modules
 - `tb/`               — Python cocotb testbenches
 
@@ -27,7 +29,7 @@ This repository implements the **Prosperity PPU**—a hardware accelerator for s
 2. **Detection:** For each row, the detector finds all possible prefixes (subsets).
 3. **Pruning:** The pruner selects the best prefix (max overlap, lowest index) and computes the suffix mask (bits to compute).
 4. **Dispatch:** The dispatcher sorts all rows by popcount and row index, ensuring all prefixes are processed before their suffixes.
-5. **Processing:** Only the suffix bits are computed, reusing results from prefixes for maximum efficiency.
+5. **Processing:** The 128-PE processor array performs matrix computation, reusing prefix results and computing only the suffix bits for maximum efficiency. Each PE uses 8-bit weights with 16-bit accumulators.
 
 ## Running Tests
 
@@ -48,7 +50,14 @@ pytest tb/test_top.py
 
 ## Customization
 - Change `ROWS`, `SPIKES`, and `NO_WIDTH` parameters in the testbenches or top module for different tile sizes.
+- Adjust `PE_COUNT`, `WEIGHT_WIDTH`, and `ACC_WIDTH` parameters for different processor configurations.
 - Edit the testbenches in `tb/` to create custom spike patterns or test new scenarios.
+
+### Resource Requirements (Kintex-7 FPGA)
+- **LUTs:** ~40,000-50,000 (20-25% of XC7K325T)
+- **Flip-Flops:** ~20,000 (5% of XC7K325T)  
+- **BRAM:** 2-4 blocks (1% of available)
+- **DSP:** 0 (uses only additions)
 
 ## References
 - [Prosperity: Accelerating SNNs via Product Sparsity (arXiv:2503.03379)](https://arxiv.org/abs/2503.03379)

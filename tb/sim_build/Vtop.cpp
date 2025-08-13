@@ -12,21 +12,38 @@ Vtop::Vtop(VerilatedContext* _vcontextp__, const char* _vcname__)
     , vlSymsp{new Vtop__Syms(contextp(), _vcname__, this)}
     , clk{vlSymsp->TOP.clk}
     , rst_n{vlSymsp->TOP.rst_n}
-    , row_info_valid{vlSymsp->TOP.row_info_valid}
-    , row_info_ready{vlSymsp->TOP.row_info_ready}
-    , row_idx{vlSymsp->TOP.row_idx}
-    , row_prefix_id{vlSymsp->TOP.row_prefix_id}
-    , row_popcnt{vlSymsp->TOP.row_popcnt}
-    , row_last{vlSymsp->TOP.row_last}
-    , proc_ready{vlSymsp->TOP.proc_ready}
+    , cfg_enable{vlSymsp->TOP.cfg_enable}
+    , cfg_auto_repeat{vlSymsp->TOP.cfg_auto_repeat}
+    , ppu_ready{vlSymsp->TOP.ppu_ready}
+    , ppu_busy{vlSymsp->TOP.ppu_busy}
+    , tile_start{vlSymsp->TOP.tile_start}
+    , tile_done{vlSymsp->TOP.tile_done}
+    , tile_mem_addr{vlSymsp->TOP.tile_mem_addr}
+    , tile_mem_wr_en{vlSymsp->TOP.tile_mem_wr_en}
+    , pc_mem_addr{vlSymsp->TOP.pc_mem_addr}
+    , pc_mem_data_in{vlSymsp->TOP.pc_mem_data_in}
+    , pc_mem_data_out{vlSymsp->TOP.pc_mem_data_out}
+    , pc_mem_wr_en{vlSymsp->TOP.pc_mem_wr_en}
     , task_valid{vlSymsp->TOP.task_valid}
     , task_row_id{vlSymsp->TOP.task_row_id}
     , task_prefix_id{vlSymsp->TOP.task_prefix_id}
-    , prev_compute_busy{vlSymsp->TOP.prev_compute_busy}
-    , pruner_done{vlSymsp->TOP.pruner_done}
-    , tile_done{vlSymsp->TOP.tile_done}
-    , row_pattern{vlSymsp->TOP.row_pattern}
+    , weight_addr{vlSymsp->TOP.weight_addr}
+    , weight_rd_en{vlSymsp->TOP.weight_rd_en}
+    , output_rd_addr{vlSymsp->TOP.output_rd_addr}
+    , output_wr_addr{vlSymsp->TOP.output_wr_addr}
+    , output_wr_en{vlSymsp->TOP.output_wr_en}
+    , dbg_state{vlSymsp->TOP.dbg_state}
+    , dbg_det_ready{vlSymsp->TOP.dbg_det_ready}
+    , dbg_prn_ready{vlSymsp->TOP.dbg_prn_ready}
+    , dbg_dsp_ready{vlSymsp->TOP.dbg_dsp_ready}
+    , dbg_proc_busy{vlSymsp->TOP.dbg_proc_busy}
+    , core_ready{vlSymsp->TOP.core_ready}
+    , tile_mem_data_in{vlSymsp->TOP.tile_mem_data_in}
+    , tile_mem_data_out{vlSymsp->TOP.tile_mem_data_out}
     , task_pattern{vlSymsp->TOP.task_pattern}
+    , weight_data{vlSymsp->TOP.weight_data}
+    , output_rd_data{vlSymsp->TOP.output_rd_data}
+    , output_wr_data{vlSymsp->TOP.output_wr_data}
     , rootp{&(vlSymsp->TOP)}
 {
     // Register model with the context

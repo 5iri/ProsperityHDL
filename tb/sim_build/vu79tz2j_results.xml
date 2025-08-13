@@ -1,6 +1,0 @@
-<testsuites name="results">
-  <testsuite name="all" package="all">
-    <property name="random_seed" value="1752154611" />
-    <testcase name="test_pruner_prefix_selection_256x16" classname="test_pruner" file="/Users/lazybanana/github/snn_prosperity/tb/test_pruner.py" lineno="167" time="1.0267410278320312" sim_time_ns="20500.001" ratio_time="19966.0873037146" />
-  </testsuite>
-</testsuites>

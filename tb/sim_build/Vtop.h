@@ -32,21 +32,38 @@ class alignas(VL_CACHE_LINE_BYTES) Vtop VL_NOT_FINAL : public VerilatedModel {
     // propagate new values into/out from the Verilated model.
     VL_IN8(&clk,0,0);
     VL_IN8(&rst_n,0,0);
-    VL_IN8(&row_info_valid,0,0);
-    VL_OUT8(&row_info_ready,0,0);
-    VL_IN8(&row_idx,7,0);
-    VL_IN8(&row_prefix_id,7,0);
-    VL_IN8(&row_popcnt,7,0);
-    VL_IN8(&row_last,0,0);
-    VL_IN8(&proc_ready,0,0);
+    VL_IN8(&cfg_enable,0,0);
+    VL_IN8(&cfg_auto_repeat,0,0);
+    VL_OUT8(&ppu_ready,0,0);
+    VL_OUT8(&ppu_busy,0,0);
+    VL_IN8(&tile_start,0,0);
+    VL_OUT8(&tile_done,0,0);
+    VL_IN8(&tile_mem_addr,7,0);
+    VL_IN8(&tile_mem_wr_en,0,0);
+    VL_IN8(&pc_mem_addr,7,0);
+    VL_IN8(&pc_mem_data_in,7,0);
+    VL_OUT8(&pc_mem_data_out,7,0);
+    VL_IN8(&pc_mem_wr_en,0,0);
     VL_OUT8(&task_valid,0,0);
     VL_OUT8(&task_row_id,7,0);
     VL_OUT8(&task_prefix_id,7,0);
-    VL_IN8(&prev_compute_busy,0,0);
-    VL_IN8(&pruner_done,0,0);
-    VL_OUT8(&tile_done,0,0);
-    VL_IN16(&row_pattern,15,0);
+    VL_OUT8(&weight_addr,3,0);
+    VL_OUT8(&weight_rd_en,0,0);
+    VL_OUT8(&output_rd_addr,7,0);
+    VL_OUT8(&output_wr_addr,7,0);
+    VL_OUT8(&output_wr_en,0,0);
+    VL_OUT8(&dbg_state,3,0);
+    VL_OUT8(&dbg_det_ready,0,0);
+    VL_OUT8(&dbg_prn_ready,0,0);
+    VL_OUT8(&dbg_dsp_ready,0,0);
+    VL_OUT8(&dbg_proc_busy,0,0);
+    VL_OUT8(&core_ready,0,0);
+    VL_IN16(&tile_mem_data_in,15,0);
+    VL_OUT16(&tile_mem_data_out,15,0);
     VL_OUT16(&task_pattern,15,0);
+    VL_INW(&weight_data,1023,0,32);
+    VL_INW(&output_rd_data,2047,0,64);
+    VL_OUTW(&output_wr_data,2047,0,64);
 
     // CELLS
     // Public to allow access to /* verilator public */ items.
