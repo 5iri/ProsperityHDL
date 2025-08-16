@@ -89,8 +89,8 @@ def generate_complex_subsets(width):
         (1 << width) - 1,           # All ones
         0,                          # All zeros
         (1 << (width//2)) - 1,     # Half ones
-        0xAAAA & ((1 << width) - 1),  # Alternating
-        0x5555 & ((1 << width) - 1),  # Alternating
+        0xAAAA & ((1 << width) - 1),  # Alternating pattern 1
+        0x5555 & ((1 << width) - 1),  # Alternating pattern 2
         1 << (width-1),            # MSB only
         1,                         # LSB only
         0x0F0F & ((1 << width) - 1)  # Nibble pattern
@@ -99,26 +99,49 @@ def generate_complex_subsets(width):
     # Add base patterns
     patterns.extend(base_patterns)
     
-    # Create subsets with known relationships
+    # Create subsets with known relationships - use set to avoid duplicates
+    pattern_set = set(patterns)
+    
     for base in base_patterns:
-        # Create direct subset
-        subset = base & (base >> 1)
-        patterns.append(subset)
+        if base == 0:
+            continue  # Skip zero base to avoid generating more zeros
+            
+        # Create direct subset by clearing some bits
+        if base > 1:
+            subset = base & (base - 1)  # Clear lowest set bit
+            pattern_set.add(subset)
         
-        # Create partial overlap
-        overlap = base | (base << 1)
+        # Create partial overlap by shifting
+        overlap = base | (base >> 1)
         overlap &= (1 << width) - 1  # Mask to width
-        patterns.append(overlap)
+        pattern_set.add(overlap)
         
-        # Create disjoint pattern
-        disjoint = base ^ (base << 1)
-        disjoint &= (1 << width) - 1  # Mask to width
-        patterns.append(disjoint)
+        # Create XOR pattern
+        disjoint = base ^ ((base >> 1) | 1)
+        disjoint &= (1 << width) - 1  # Mask to width  
+        pattern_set.add(disjoint)
         
-        # Create sparse subset
-        sparse = base & 0xAAAA
-        sparse &= (1 << width) - 1  # Mask to width
-        patterns.append(sparse)
+        # Create sparse subset by masking with different patterns
+        for mask in [0xAAAA, 0x5555, 0x0F0F, 0xF0F0]:
+            sparse = base & mask
+            sparse &= (1 << width) - 1  # Mask to width
+            if sparse != 0:  # Avoid adding more zeros
+                pattern_set.add(sparse)
+    
+    # Add some additional random-like patterns
+    import random
+    random.seed(42)  # Deterministic for reproducible tests
+    for i in range(min(10, width)):
+        # Create patterns with specific bit counts
+        pattern = 0
+        num_bits = i + 1
+        bit_positions = random.sample(range(width), min(num_bits, width))
+        for pos in bit_positions:
+            pattern |= (1 << pos)
+        pattern_set.add(pattern)
+    
+    # Convert back to list and remove duplicates
+    patterns = list(pattern_set)
     
     return patterns
 
@@ -153,16 +176,25 @@ async def verify_subset_detection(dut, patterns, width):
         
         # Verify subset relationships
         si_vec = int(dut.si_vec.value)
-        for j, test_pattern in enumerate(patterns):
-            is_subset = (test_pattern & pattern) == test_pattern
+        actual_loaded_patterns = min(len(patterns), ROWS_IN_TILE)
+        
+        for j in range(ROWS_IN_TILE):
+            if j < actual_loaded_patterns:
+                # Check against actual loaded pattern
+                test_pattern = patterns[j]
+            else:
+                # Remaining entries are zeros
+                test_pattern = 0
+                
+            is_subset_expected = (test_pattern & pattern) == test_pattern
             is_detected = (si_vec >> j) & 1
             
-            if is_subset != is_detected:
+            if is_subset_expected != is_detected:
                 raise ValueError(
-                    f"Subset detection error:\n"
-                    f"  Pattern: {pattern:0{width}b}\n"
-                    f"  Test:    {test_pattern:0{width}b}\n"
-                    f"  Expected subset: {is_subset}\n"
+                    f"Subset detection error at TCAM entry {j}:\n"
+                    f"  Query:    {pattern:0{width}b}\n"
+                    f"  TCAM[{j}]: {test_pattern:0{width}b}\n"
+                    f"  Expected subset: {is_subset_expected}\n"
                     f"  Detected: {is_detected}"
                 )
         
@@ -189,13 +221,27 @@ async def test_detector_complex_patterns(dut):
         
         # Generate complex patterns
         patterns = generate_complex_subsets(width)
-        cocotb.log.info(f"Generated {len(patterns)} test patterns")
+        unique_patterns_before_test = len(set(patterns))
+        cocotb.log.info(f"Generated {len(patterns)} test patterns ({unique_patterns_before_test} unique)")
+        
+        # Log a few example patterns for debugging
+        if len(patterns) > 0:
+            example_patterns = patterns[:min(10, len(patterns))]
+            cocotb.log.info(f"Example patterns: {[f'{p:0{width}b}' for p in example_patterns]}")
         
         # Load patterns into TCAM (ensure they fit in 16 bits)
+        # Initialize all TCAM entries first to avoid undefined behavior
+        for i in range(ROWS_IN_TILE):
+            dut.tile_buffer[i].value = 0
+        
+        # Now load our test patterns
         for i, pattern in enumerate(patterns):
             if i >= ROWS_IN_TILE:
                 break  # Don't exceed tile size
             dut.tile_buffer[i].value = pattern & 0xFFFF  # Ensure 16-bit limit
+        
+        # Log what we loaded for debugging
+        cocotb.log.info(f"Loaded {min(len(patterns), ROWS_IN_TILE)} patterns into TCAM")
         
         # Wait for initialization
         await ClockCycles(dut.clk, RESET_CYCLES * 2)
@@ -216,6 +262,36 @@ async def test_detector_complex_patterns(dut):
             
             # Verify latency requirement
             assert max(latencies) <= 3, f"Latency exceeded 3 cycles: {max(latencies)}"
+            
+            # Verify functional correctness - all queries should have valid results
+            assert all(r['matches'] >= 0 for r in results), "Some queries returned invalid match counts"
+            
+            # Verify reasonable match counts (check against TCAM size, not test pattern count)
+            for result in results:
+                assert 0 <= result['matches'] <= ROWS_IN_TILE, \
+                    f"Invalid match count {result['matches']} for TCAM with {ROWS_IN_TILE} entries (pattern: {result['pattern']:016b})"
+                
+                # Additional check: if pattern is all-ones for the given width, it should match many entries
+                max_pattern_for_width = (1 << width) - 1
+                if result['pattern'] == max_pattern_for_width:
+                    # All-ones pattern should match a significant number of entries
+                    assert result['matches'] >= len(patterns) // 2, \
+                        f"All-ones pattern {result['pattern']:016b} should match many entries, got {result['matches']}"
+                elif result['pattern'] == 0:
+                    # All-zeros pattern should only match the zero entry
+                    assert result['matches'] >= 1, \
+                        f"All-zeros pattern should match at least itself, got {result['matches']}"
+            
+            # Verify latency consistency - all results should have valid latency
+            for result in results:
+                assert 0 < result['latency'] <= 5, \
+                    f"Invalid latency {result['latency']} for pattern {result['pattern']:016b}"
+            
+            # Verify pattern diversity in test set
+            unique_patterns = len(set(r['pattern'] for r in results))
+            min_expected_unique = max(8, len(results) // 4)  # At least 8 unique or 25% of total
+            assert unique_patterns >= min_expected_unique, \
+                f"Insufficient pattern diversity: {unique_patterns} unique out of {len(results)} (expected at least {min_expected_unique})"
             
         except Exception as e:
             cocotb.log.error(f"Test failed for width {width}: {e}")
@@ -381,7 +457,7 @@ async def detector_subset_index_test(dut):
         cocotb.log.info(f"Results @cycle {end_cycle} (latency={actual_latency} cycles):")
         cocotb.log.info(f"  si_vec:  {si_vec:0256b}")
 
-        # Validate results
+        # Validate results - add meaningful assertions
         # Check si_vec
         if si_vec != expected_si_bits:
             cocotb.log.error(f"SI_VEC MISMATCH:")
@@ -392,11 +468,17 @@ async def detector_subset_index_test(dut):
             got_rows = [i for i in range(256) if (si_vec >> i) & 1]
             cocotb.log.error(f"  Got rows: {got_rows}")
             cocotb.log.error(f"  Expected: {expected_rows}")
+            all_tests_passed = False
         else:
             cocotb.log.info(f"✓ SI_VEC correct: matches rows {expected_rows}")
 
+        # Assert correctness of subset index vector
+        assert si_vec == expected_si_bits, \
+            f"Subset index vector incorrect: got {si_vec:064b}, expected {expected_si_bits:064b}"
+
         # Verify subset logic manually for each spike pattern
         cocotb.log.info("Manual subset verification:")
+        mismatch_count = 0
         for i in range(len(spike_patterns)):
             pattern = spike_patterns[i]
             is_match = is_subset(pattern, query_pattern)
@@ -404,6 +486,18 @@ async def detector_subset_index_test(dut):
 
             if is_match != should_be_set:
                 cocotb.log.error(f"    ✗ Mismatch for row {i}!")
+                mismatch_count += 1
+        
+        # Assert no subset logic mismatches
+        assert mismatch_count == 0, \
+            f"Found {mismatch_count} subset logic mismatches for pattern {query_pattern:016b}"
+        
+        # Assert valid latency bounds
+        assert 1 <= actual_latency <= 5, \
+            f"Latency {actual_latency} is outside reasonable bounds [1, 5] cycles"
+        
+        # Store latency for later analysis
+        latency_stats.append(actual_latency)
 
          # Wait a few cycles before next test
         for _ in range(5):
@@ -435,6 +529,12 @@ async def detector_subset_index_test(dut):
         cocotb.log.info("\nALL TESTS PASSED")
     else:
         cocotb.log.error("\nSOME TESTS FAILED")
+    
+    # Assert all tests passed
+    assert all_tests_passed, "One or more detector tests failed"
+    
+    # Assert reasonable test coverage
+    assert num_tests >= 10, f"Insufficient test coverage: only {num_tests} tests run"
 
     cocotb.log.info("\n=== Detector subset index calculation test complete ===")
 
