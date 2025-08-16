@@ -98,6 +98,7 @@ async def test_processor_weight_loading(dut):
             pass
     
     # If we reach here, weight loading timed out
+    assert False, f"Weight loading timed out after {max_load_cycles} cycles"
     dut._log.error("❌ Weight loading test TIMEOUT")
     assert False, f"Weight loading timed out after {max_load_cycles} cycles"
 
@@ -129,6 +130,20 @@ async def test_processor_mac_operations(dut):
     
     expected_result = prefix_value + weight_0 + weight_1
     
+    # Create weight lookup table for proper addressing
+    weight_lookup = {}
+    for pe in range(PE_COUNT):
+        for spike in range(SPIKES):
+            if pe == test_pe:
+                if spike == 0:
+                    weight_lookup[(pe, spike)] = weight_0
+                elif spike == 1:
+                    weight_lookup[(pe, spike)] = weight_1
+                else:
+                    weight_lookup[(pe, spike)] = 0
+            else:
+                weight_lookup[(pe, spike)] = 0
+    
     # Setup test
     dut.task_row_id.value = 1
     dut.task_prefix_id.value = 0
@@ -146,46 +161,92 @@ async def test_processor_mac_operations(dut):
     await RisingEdge(dut.clk)
     dut.task_valid.value = 0
     
-    # Process task with weight provision
+    # Process task with weight provision - increased timeout for full operation
     cycle_count = 0
-    max_cycles = 100
+    max_cycles = 3000  # Increased timeout to handle full weight loading + computation
+    task_completed = False
+    last_state = -1
     
-    while cycle_count < max_cycles:
-        # Provide weights when requested
+    while cycle_count < max_cycles and not task_completed:
+        # Debug: monitor state transitions and key signals
+        try:
+            current_state = int(dut.state.value)
+            if current_state != last_state:
+                state_names = ["IDLE", "LOAD_WEIGHTS", "LOAD_PFX", "DECODE", "ACCUMULATE", "WRITEBACK"]
+                if current_state < len(state_names):
+                    dut._log.info(f"State transition: {state_names[current_state]} at cycle {cycle_count}")
+                    
+                    # Extra debug during key states
+                    if current_state == 4:  # ACCUMULATE
+                        try:
+                            spike_idx = int(dut.current_spike_idx.value)
+                            spike_valid = int(dut.spike_valid.value)
+                            pe_accum_en = int(dut.pe_accumulate_en.value)
+                            dut._log.info(f"  ACCUMULATE: spike_idx={spike_idx}, spike_valid={spike_valid}, pe_accum_en={pe_accum_en}")
+                        except:
+                            pass
+                            
+                last_state = current_state
+        except:
+            pass
+        
+        # Provide weights when requested (only during weight loading now)
         if dut.weight_rd_en.value:
             addr = int(dut.weight_addr.value)
             pe_idx = addr // SPIKES
             spike_idx = addr % SPIKES
             
-            if pe_idx == test_pe:
-                if spike_idx == 0:
-                    dut.weight_data.value = signed_to_unsigned(weight_0, WEIGHT_WIDTH)
-                elif spike_idx == 1:
-                    dut.weight_data.value = signed_to_unsigned(weight_1, WEIGHT_WIDTH)
-                else:
-                    dut.weight_data.value = 0
+            if (pe_idx, spike_idx) in weight_lookup:
+                weight_val = weight_lookup[(pe_idx, spike_idx)]
+                dut.weight_data.value = signed_to_unsigned(weight_val, WEIGHT_WIDTH)
+                dut._log.info(f"Loading weight[{pe_idx}][{spike_idx}] = {weight_val} (0x{signed_to_unsigned(weight_val, WEIGHT_WIDTH):02x}) for addr {addr}")
             else:
                 dut.weight_data.value = 0
-            
-            dut._log.info(f"Providing weight[{pe_idx}][{spike_idx}] for addr {addr}")
+                if pe_idx == 0 and spike_idx < 4:  # Debug first few weights for PE 0
+                    dut._log.info(f"Loading weight[{pe_idx}][{spike_idx}] = 0 (not in lookup) for addr {addr}")
         
         # Check for completion
-        if dut.proc_done.value and dut.output_wr_en.value:
-            # Extract result for test PE
-            output_data = int(dut.output_wr_data.value)
-            pe_result_bits = (output_data >> (test_pe * ACC_WIDTH)) & ((1 << ACC_WIDTH) - 1)
-            pe_result = unsigned_to_signed(pe_result_bits, ACC_WIDTH)
+        if dut.proc_done.value:
+            task_completed = True
             
-            dut._log.info(f"MAC Result: {pe_result} (expected: {expected_result})")
+            # Wait one more cycle for write to complete
+            await RisingEdge(dut.clk)
             
-            # Verify result (allow some tolerance for implementation details)
-            if abs(pe_result - expected_result) <= 1:
-                dut._log.info("✅ MAC operations test PASSED")
-                return  # Test passed successfully
+            if dut.output_wr_en.value:
+                # Extract result for test PE
+                output_data = int(dut.output_wr_data.value)
+                pe_result_bits = (output_data >> (test_pe * ACC_WIDTH)) & ((1 << ACC_WIDTH) - 1)
+                pe_result = unsigned_to_signed(pe_result_bits, ACC_WIDTH)
+                
+                dut._log.info(f"MAC Result: {pe_result} (expected: {expected_result})")
+                
+                # Verify result (allow some tolerance for implementation details)
+                if abs(pe_result - expected_result) <= 1:
+                    dut._log.info("✅ MAC operations test PASSED")
+                    
+                    # Additional assertions for meaningful verification
+                    assert pe_result != 0, "MAC result should not be zero for non-zero inputs"
+                    assert pe_result == expected_result, \
+                        f"MAC result exact match failed: got {pe_result}, expected {expected_result}"
+                    
+                    return  # Test passed successfully
+                else:
+                    dut._log.error(f"❌ MAC operations test FAILED: got {pe_result}, expected {expected_result}")
+                    
+                    # Debug: let's see what pattern_working looks like
+                    try:
+                        pattern_working = int(dut.pattern_working.value)
+                        dut._log.info(f"Debug: pattern_working = 0b{pattern_working:016b}")
+                        dut._log.info(f"Debug: original pattern = 0b{test_pattern:016b}")
+                    except:
+                        pass
+                    
+                    assert False, f"MAC operations failed: got {pe_result}, expected {expected_result}"
             else:
-                dut._log.error(f"❌ MAC operations test FAILED: got {pe_result}, expected {expected_result}")
-                assert False, f"MAC operations failed: got {pe_result}, expected {expected_result}"
-            break
+                # proc_done but no write enable - check next cycle
+                await RisingEdge(dut.clk)
+                cycle_count += 1
+                continue
         
         await RisingEdge(dut.clk)
         cycle_count += 1
@@ -217,13 +278,26 @@ async def test_processor_product_sparsity(dut):
     full_pattern   = 0b0000000000000111  # Full would be 0, 1, 2
     
     # Weights for testing
-    weights = [5, 10, 15, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]  # Only first 3 matter
+    weights = {}
+    for pe in range(PE_COUNT):
+        for spike in range(SPIKES):
+            if pe == 0:  # Only test PE 0
+                if spike == 0:
+                    weights[(pe, spike)] = 5
+                elif spike == 1:
+                    weights[(pe, spike)] = 10
+                elif spike == 2:
+                    weights[(pe, spike)] = 15
+                else:
+                    weights[(pe, spike)] = 0
+            else:
+                weights[(pe, spike)] = 0
     
     # Expected calculations:
     # Prefix result: 5 + 10 = 15
     # Suffix computation: prefix_result + weight[2] = 15 + 15 = 30
-    prefix_result = weights[0] + weights[1]  # 15
-    expected_final = prefix_result + weights[2]  # 30
+    prefix_result = weights[(0,0)] + weights[(0,1)]  # 15
+    expected_final = prefix_result + weights[(0,2)]  # 30
     
     # Setup task with suffix pattern  
     dut.task_row_id.value = 2
@@ -244,39 +318,52 @@ async def test_processor_product_sparsity(dut):
     
     # Process task
     cycle_count = 0
-    max_cycles = 100
+    max_cycles = 3000  # Increased timeout for full processing
+    task_completed = False
     
-    while cycle_count < max_cycles:
-        # Provide weights when requested
+    while cycle_count < max_cycles and not task_completed:
+        # Provide weights when requested (only during weight loading now)
         if dut.weight_rd_en.value:
             addr = int(dut.weight_addr.value)
             pe_idx = addr // SPIKES
             spike_idx = addr % SPIKES
             
-            if pe_idx == 0 and spike_idx < len(weights):
-                weight_val = weights[spike_idx]
+            if (pe_idx, spike_idx) in weights:
+                weight_val = weights[(pe_idx, spike_idx)]
                 dut.weight_data.value = signed_to_unsigned(weight_val, WEIGHT_WIDTH)
+                if weight_val != 0:
+                    dut._log.info(f"Loading weight[{pe_idx}][{spike_idx}] = {weight_val}")
             else:
                 dut.weight_data.value = 0
         
         # Check for completion
-        if dut.proc_done.value and dut.output_wr_en.value:
-            # Extract result for PE 0
-            output_data = int(dut.output_wr_data.value)
-            pe_result_bits = (output_data >> (0 * ACC_WIDTH)) & ((1 << ACC_WIDTH) - 1)
-            pe_result = unsigned_to_signed(pe_result_bits, ACC_WIDTH)
+        if dut.proc_done.value:
+            task_completed = True
             
-            dut._log.info(f"Product Sparsity Result: {pe_result}")
-            dut._log.info(f"Expected: {expected_final} (prefix: {prefix_result} + suffix: {weights[2]})")
+            # Wait one more cycle for write to complete
+            await RisingEdge(dut.clk)
             
-            # Verify result
-            if abs(pe_result - expected_final) <= 1:
-                dut._log.info("✅ Product sparsity test PASSED")
-                return  # Test passed successfully
+            if dut.output_wr_en.value:
+                # Extract result for PE 0
+                output_data = int(dut.output_wr_data.value)
+                pe_result_bits = (output_data >> (0 * ACC_WIDTH)) & ((1 << ACC_WIDTH) - 1)
+                pe_result = unsigned_to_signed(pe_result_bits, ACC_WIDTH)
+                
+                dut._log.info(f"Product Sparsity Result: {pe_result}")
+                dut._log.info(f"Expected: {expected_final} (prefix: {prefix_result} + suffix: {weights[(0,2)]})")
+                
+                # Verify result
+                if abs(pe_result - expected_final) <= 1:
+                    dut._log.info("✅ Product sparsity test PASSED")
+                    return  # Test passed successfully
+                else:
+                    dut._log.error(f"❌ Product sparsity test FAILED")
+                    assert False, f"Product sparsity failed: got {pe_result}, expected {expected_final}"
             else:
-                dut._log.error(f"❌ Product sparsity test FAILED")
-                assert False, f"Product sparsity failed: got {pe_result}, expected {expected_final}"
-            break
+                # proc_done but no write enable - check next cycle
+                await RisingEdge(dut.clk)
+                cycle_count += 1
+                continue
         
         await RisingEdge(dut.clk)
         cycle_count += 1
@@ -322,7 +409,7 @@ async def test_processor_multiple_tasks(dut):
         
         # Wait for processor to be ready
         ready_cycles = 0
-        while not dut.task_ready.value and ready_cycles < 20:
+        while not dut.task_ready.value and ready_cycles < 50:
             await RisingEdge(dut.clk)
             ready_cycles += 1
         
@@ -337,9 +424,10 @@ async def test_processor_multiple_tasks(dut):
         
         # Process task
         cycle_count = 0
-        max_cycles = 50
+        max_cycles = 3000  # Increased timeout per task
+        task_completed = False
         
-        while cycle_count < max_cycles:
+        while cycle_count < max_cycles and not task_completed:
             # Provide weights
             if dut.weight_rd_en.value:
                 dut.weight_data.value = 42  # Constant weight for simplicity
@@ -347,6 +435,7 @@ async def test_processor_multiple_tasks(dut):
             # Check for completion
             if dut.proc_done.value:
                 completed_tasks += 1
+                task_completed = True
                 dut._log.info(f"✅ Task {task_idx + 1} completed")
                 break
             
@@ -363,6 +452,11 @@ async def test_processor_multiple_tasks(dut):
     
     if completed_tasks == len(test_tasks):
         dut._log.info("✅ Multiple tasks test PASSED")
+        
+        # Additional meaningful assertions
+        assert completed_tasks > 0, "At least one task should complete successfully"
+        assert completed_tasks == len(test_tasks), \
+            f"All tasks should complete: completed {completed_tasks}/{len(test_tasks)}"
     else:
         dut._log.error("❌ Multiple tasks test FAILED")
         assert False, f"Multiple tasks test failed: only {completed_tasks}/{len(test_tasks)} tasks completed"

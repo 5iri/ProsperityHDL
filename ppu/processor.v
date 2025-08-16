@@ -56,9 +56,10 @@ module processor #(
     localparam ST_LOAD_PFX   = 3'd2;
     localparam ST_DECODE     = 3'd3;
     localparam ST_ACCUMULATE = 3'd4;
-    localparam ST_WRITEBACK  = 3'd5;
+    localparam ST_CLEAR_BIT  = 3'd5;
+    localparam ST_WRITEBACK  = 3'd6;
     
-    reg [2:0] state, next_state;
+    reg [3:0] state, next_state;
     reg [$clog2(ROWS)-1:0] current_row_id;
     reg [$clog2(ROWS)-1:0] current_prefix_id;
     reg [SPIKES-1:0] current_pattern;
@@ -76,6 +77,12 @@ module processor #(
     reg weight_loading;
     reg weights_loaded;
     
+    // Delayed indices for proper weight storage timing
+    reg [$clog2(PE_COUNT)-1:0] weight_store_pe_idx;
+    reg [$clog2(SPIKES)-1:0] weight_store_spike_idx;
+    reg weight_store_valid;
+
+    
     // Address Decoder Signals
     reg [$clog2(SPIKES)-1:0] current_spike_idx;
     reg spike_valid;
@@ -92,8 +99,8 @@ module processor #(
     
     // Weight memory address calculation
     assign weight_addr = weight_loading ? (($clog2(SPIKES*PE_COUNT))'(weight_load_pe_idx) * SPIKES + ($clog2(SPIKES*PE_COUNT))'(weight_load_spike_idx)) : 
-                                         (($clog2(SPIKES*PE_COUNT))'(current_spike_idx) * PE_COUNT + ($clog2(SPIKES*PE_COUNT))'(weight_load_pe_idx));
-    assign weight_rd_en = weight_loading || (spike_valid && (state == ST_ACCUMULATE));
+                                         {($clog2(SPIKES*PE_COUNT)){1'b0}}; // Not used during computation
+    assign weight_rd_en = weight_loading; // Only read during weight loading, not during computation
     
     // Weight loading logic
     always @(posedge clk) begin
@@ -102,13 +109,26 @@ module processor #(
             weights_loaded <= 1'b0;
             weight_load_pe_idx <= 0;
             weight_load_spike_idx <= 0;
+            weight_store_pe_idx <= 0;
+            weight_store_spike_idx <= 0;
+            weight_store_valid <= 1'b0;
+
         end else if (state == ST_LOAD_WEIGHTS) begin
             if (!weights_loaded) begin
                 weight_loading <= 1'b1;
-                // Load weights sequentially
+                
+                // Store weight data using delayed indices (one cycle behind current)
+                if (weight_store_valid) begin
+                    weight_buffer[weight_store_pe_idx][weight_store_spike_idx] <= weight_data;
+                end
+                
+                // Update delayed storage indices to current load indices
+                weight_store_pe_idx <= weight_load_pe_idx;
+                weight_store_spike_idx <= weight_load_spike_idx;
+                weight_store_valid <= weight_loading; // Valid after first cycle
+                
+                // Increment load indices for next address generation
                 if (weight_loading) begin
-                    weight_buffer[weight_load_pe_idx][weight_load_spike_idx] <= weight_data;
-                    
                     if (weight_load_spike_idx == ($clog2(SPIKES))'(SPIKES-1)) begin
                         weight_load_spike_idx <= 0;
                         if (weight_load_pe_idx == ($clog2(PE_COUNT))'(PE_COUNT-1)) begin
@@ -131,29 +151,27 @@ module processor #(
         for (i = 0; i < PE_COUNT; i = i + 1) begin : pe_array
             // Assign current weight for active spike
             always @(*) begin
-                if (spike_valid && current_spike_idx < ($clog2(SPIKES))'(SPIKES))
+                if (spike_valid)
                     pe_weight[i] = weight_buffer[i][current_spike_idx];
                 else
                     pe_weight[i] = {WEIGHT_WIDTH{1'b0}};
             end
             
             // Processing Element: 8-bit Multiply + 16-bit Accumulator (MAC)
-            wire [WEIGHT_WIDTH:0] pe_spike_input;  // Spike input (0 or 1) extended to match weight width
-            wire [WEIGHT_WIDTH+1-1:0] pe_product; // Multiplication result
+            wire signed [ACC_WIDTH-1:0] pe_weight_extended;
             
-            // Spike input is binary (0 or 1), weights are 8-bit signed
-            assign pe_spike_input = spike_valid ? {{WEIGHT_WIDTH{1'b0}}, 1'b1} : {(WEIGHT_WIDTH+1){1'b0}};
-            assign pe_product = pe_weight[i] * pe_spike_input[0]; // Multiply by 0 or 1
+            // Sign extend weight to accumulator width
+            assign pe_weight_extended = {{(ACC_WIDTH-WEIGHT_WIDTH){pe_weight[i][WEIGHT_WIDTH-1]}}, pe_weight[i]};
             
             always @(posedge clk) begin
                 if (!rst_n) begin
                     pe_partial_sum[i] <= 0;
-                end else if (state == ST_LOAD_PFX && prefix_loaded) begin
-                    // Load prefix result as starting point
-                    pe_partial_sum[i] <= prefix_result[(i+1)*ACC_WIDTH-1:i*ACC_WIDTH];
-                end else if (pe_accumulate_en && spike_valid) begin
-                    // MAC operation: accumulate weight * spike_input
-                    pe_partial_sum[i] <= pe_partial_sum[i] + {{(ACC_WIDTH-WEIGHT_WIDTH-1){pe_product[WEIGHT_WIDTH]}}, pe_product};
+                end else if (state == ST_LOAD_PFX) begin
+                    // Load prefix result as starting point directly from input
+                    pe_partial_sum[i] <= output_rd_data[(i+1)*ACC_WIDTH-1:i*ACC_WIDTH];
+                end else if (state == ST_ACCUMULATE && spike_valid) begin
+                    // MAC operation: add weight when spike is active
+                    pe_partial_sum[i] <= pe_partial_sum[i] + pe_weight_extended;
                 end
             end
         end
@@ -226,9 +244,7 @@ module processor #(
             end
             
             ST_LOAD_PFX: begin
-                if (prefix_loaded) begin
-                    next_state = ST_DECODE;
-                end
+                next_state = ST_DECODE; // Always transition after one cycle
             end
             
             ST_DECODE: begin
@@ -240,7 +256,13 @@ module processor #(
             end
             
             ST_ACCUMULATE: begin
-                next_state = ST_DECODE;  // Continue processing next spike
+                // Go to clear bit state to clear the processed bit
+                next_state = ST_CLEAR_BIT;
+            end
+            
+            ST_CLEAR_BIT: begin
+                // After clearing bit, go back to decode for next spike
+                next_state = ST_DECODE;
             end
             
             ST_WRITEBACK: begin
@@ -283,6 +305,7 @@ module processor #(
                 end
                 
                 ST_LOAD_PFX: begin
+                    // Load prefix data on first cycle in this state
                     if (!prefix_loaded) begin
                         prefix_result <= output_rd_data;
                         prefix_loaded <= 1'b1;
@@ -294,9 +317,15 @@ module processor #(
                 end
                 
                 ST_ACCUMULATE: begin
-                    if (spike_valid) begin
-                        pe_accumulate_en <= 1'b1;
-                        // Clear the processed bit (flip to 0)
+                    pe_accumulate_en <= 1'b1;
+                    // Don't clear bit here, wait for CLEAR_BIT state
+                end
+                
+                ST_CLEAR_BIT: begin
+                    pe_accumulate_en <= 1'b0;
+                    // Clear the processed bit now that accumulation is complete
+                    // Use a register to store the bit index since spike_valid might change
+                    if (current_spike_idx < SPIKES && pattern_working[current_spike_idx]) begin
                         pattern_working[current_spike_idx] <= 1'b0;
                     end
                 end
