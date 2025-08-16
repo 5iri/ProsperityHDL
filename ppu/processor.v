@@ -29,10 +29,10 @@ module processor #(
     input  wire [$clog2(ROWS)-1:0]     task_prefix_id, 
     input  wire [SPIKES-1:0]           task_pattern,    // ProSparsity pattern (suffix mask)
 
-    // Weight Memory Interface  
-    output wire [$clog2(SPIKES)-1:0]   weight_addr,
-    input  wire [PE_COUNT*WEIGHT_WIDTH-1:0] weight_data,
-    output wire                        weight_rd_en,
+    // Weight Memory Interface (updated for proper addressing)
+    output wire [$clog2(SPIKES*PE_COUNT)-1:0] weight_addr,    // Address multiple weights per PE
+    input  wire [WEIGHT_WIDTH-1:0] weight_data,              // Single weight per cycle
+    output wire                    weight_rd_en,
 
     // Output Buffer Interface
     output wire [$clog2(ROWS)-1:0]     output_rd_addr,
@@ -51,11 +51,12 @@ module processor #(
     // ===================================================================
     
     // FSM States
-    localparam ST_IDLE     = 3'd0;
-    localparam ST_LOAD_PFX = 3'd1;
-    localparam ST_DECODE   = 3'd2;
-    localparam ST_ACCUMULATE = 3'd3;
-    localparam ST_WRITEBACK = 3'd4;
+    localparam ST_IDLE       = 3'd0;
+    localparam ST_LOAD_WEIGHTS = 3'd1;
+    localparam ST_LOAD_PFX   = 3'd2;
+    localparam ST_DECODE     = 3'd3;
+    localparam ST_ACCUMULATE = 3'd4;
+    localparam ST_WRITEBACK  = 3'd5;
     
     reg [2:0] state, next_state;
     reg [$clog2(ROWS)-1:0] current_row_id;
@@ -65,8 +66,15 @@ module processor #(
     
     // PE Array - 128 Processing Elements
     reg [ACC_WIDTH-1:0] pe_partial_sum [0:PE_COUNT-1];
-    wire [WEIGHT_WIDTH-1:0] pe_weight [0:PE_COUNT-1];
+    reg [WEIGHT_WIDTH-1:0] pe_weight [0:PE_COUNT-1];  // Local weight storage per PE
+    reg [WEIGHT_WIDTH-1:0] weight_buffer [0:PE_COUNT-1][0:SPIKES-1]; // Weight buffer: [PE][spike]
     reg pe_accumulate_en;
+    
+    // Weight loading control
+    reg [$clog2(PE_COUNT)-1:0] weight_load_pe_idx;
+    reg [$clog2(SPIKES)-1:0] weight_load_spike_idx;
+    reg weight_loading;
+    reg weights_loaded;
     
     // Address Decoder Signals
     reg [$clog2(SPIKES)-1:0] current_spike_idx;
@@ -79,16 +87,64 @@ module processor #(
     reg writeback_en;
     
     // ===================================================================
-    // PE Array Implementation (128 PEs)
+    // Weight Loading and PE Array Implementation
     // ===================================================================
+    
+    // Weight memory address calculation
+    assign weight_addr = weight_loading ? (($clog2(SPIKES*PE_COUNT))'(weight_load_pe_idx) * SPIKES + ($clog2(SPIKES*PE_COUNT))'(weight_load_spike_idx)) : 
+                                         (($clog2(SPIKES*PE_COUNT))'(current_spike_idx) * PE_COUNT + ($clog2(SPIKES*PE_COUNT))'(weight_load_pe_idx));
+    assign weight_rd_en = weight_loading || (spike_valid && (state == ST_ACCUMULATE));
+    
+    // Weight loading logic
+    always @(posedge clk) begin
+        if (!rst_n) begin
+            weight_loading <= 1'b0;
+            weights_loaded <= 1'b0;
+            weight_load_pe_idx <= 0;
+            weight_load_spike_idx <= 0;
+        end else if (state == ST_LOAD_WEIGHTS) begin
+            if (!weights_loaded) begin
+                weight_loading <= 1'b1;
+                // Load weights sequentially
+                if (weight_loading) begin
+                    weight_buffer[weight_load_pe_idx][weight_load_spike_idx] <= weight_data;
+                    
+                    if (weight_load_spike_idx == ($clog2(SPIKES))'(SPIKES-1)) begin
+                        weight_load_spike_idx <= 0;
+                        if (weight_load_pe_idx == ($clog2(PE_COUNT))'(PE_COUNT-1)) begin
+                            weight_load_pe_idx <= 0;
+                            weight_loading <= 1'b0;
+                            weights_loaded <= 1'b1;
+                        end else begin
+                            weight_load_pe_idx <= weight_load_pe_idx + 1;
+                        end
+                    end else begin
+                        weight_load_spike_idx <= weight_load_spike_idx + 1;
+                    end
+                end
+            end
+        end
+    end
     
     genvar i;
     generate
         for (i = 0; i < PE_COUNT; i = i + 1) begin : pe_array
-            // Weight assignment from memory
-            assign pe_weight[i] = weight_data[(i+1)*WEIGHT_WIDTH-1:i*WEIGHT_WIDTH];
+            // Assign current weight for active spike
+            always @(*) begin
+                if (spike_valid && current_spike_idx < ($clog2(SPIKES))'(SPIKES))
+                    pe_weight[i] = weight_buffer[i][current_spike_idx];
+                else
+                    pe_weight[i] = {WEIGHT_WIDTH{1'b0}};
+            end
             
-            // Processing Element: 8-bit Add + 16-bit Accumulator
+            // Processing Element: 8-bit Multiply + 16-bit Accumulator (MAC)
+            wire [WEIGHT_WIDTH:0] pe_spike_input;  // Spike input (0 or 1) extended to match weight width
+            wire [WEIGHT_WIDTH+1-1:0] pe_product; // Multiplication result
+            
+            // Spike input is binary (0 or 1), weights are 8-bit signed
+            assign pe_spike_input = spike_valid ? {{WEIGHT_WIDTH{1'b0}}, 1'b1} : {(WEIGHT_WIDTH+1){1'b0}};
+            assign pe_product = pe_weight[i] * pe_spike_input[0]; // Multiply by 0 or 1
+            
             always @(posedge clk) begin
                 if (!rst_n) begin
                     pe_partial_sum[i] <= 0;
@@ -96,8 +152,8 @@ module processor #(
                     // Load prefix result as starting point
                     pe_partial_sum[i] <= prefix_result[(i+1)*ACC_WIDTH-1:i*ACC_WIDTH];
                 end else if (pe_accumulate_en && spike_valid) begin
-                    // Accumulate weight for current spike
-                    pe_partial_sum[i] <= pe_partial_sum[i] + {{(ACC_WIDTH-WEIGHT_WIDTH){pe_weight[i][WEIGHT_WIDTH-1]}}, pe_weight[i]};
+                    // MAC operation: accumulate weight * spike_input
+                    pe_partial_sum[i] <= pe_partial_sum[i] + {{(ACC_WIDTH-WEIGHT_WIDTH-1){pe_product[WEIGHT_WIDTH]}}, pe_product};
                 end
             end
         end
@@ -125,10 +181,6 @@ module processor #(
     // ===================================================================
     // Memory Interface Logic
     // ===================================================================
-    
-    // Weight memory address
-    assign weight_addr = current_spike_idx;
-    assign weight_rd_en = spike_valid && (state == ST_ACCUMULATE);
     
     // Output buffer interface
     assign output_rd_addr = current_prefix_id;  // Read prefix result
@@ -163,6 +215,12 @@ module processor #(
         case (state)
             ST_IDLE: begin
                 if (task_valid) begin
+                    next_state = weights_loaded ? ST_LOAD_PFX : ST_LOAD_WEIGHTS;
+                end
+            end
+            
+            ST_LOAD_WEIGHTS: begin
+                if (weights_loaded) begin
                     next_state = ST_LOAD_PFX;
                 end
             end
@@ -214,6 +272,12 @@ module processor #(
                         pattern_working <= task_pattern;
                         prefix_loaded <= 1'b0;
                     end
+                    pe_accumulate_en <= 1'b0;
+                    writeback_en <= 1'b0;
+                end
+                
+                ST_LOAD_WEIGHTS: begin
+                    // Weight loading handled in separate always block
                     pe_accumulate_en <= 1'b0;
                     writeback_en <= 1'b0;
                 end

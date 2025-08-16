@@ -48,16 +48,29 @@ To run a full random pipeline test:
 pytest tb/test_top.py
 ```
 
+### Testing Suite
+
+Use the provided testing scripts:
+
+```sh
+# Run all tests
+./run_tests.sh
+
+# Test specific components
+./quick_test.sh detector
+./quick_test.sh processor_updated
+./quick_test.sh full_system
+
+# Using Makefile
+make test
+make test-component COMPONENT=detector
+make test-processor
+```
+
 ## Customization
 - Change `ROWS`, `SPIKES`, and `NO_WIDTH` parameters in the testbenches or top module for different tile sizes.
 - Adjust `PE_COUNT`, `WEIGHT_WIDTH`, and `ACC_WIDTH` parameters for different processor configurations.
 - Edit the testbenches in `tb/` to create custom spike patterns or test new scenarios.
-
-### Resource Requirements (Kintex-7 FPGA)
-- **LUTs:** ~40,000-50,000 (20-25% of XC7K325T)
-- **Flip-Flops:** ~20,000 (5% of XC7K325T)  
-- **BRAM:** 2-4 blocks (1% of available)
-- **DSP:** 0 (uses only additions)
 
 ## References
 - [Prosperity: Accelerating SNNs via Product Sparsity (arXiv:2503.03379)](https://arxiv.org/abs/2503.03379)
