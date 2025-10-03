@@ -14,6 +14,10 @@
 // (c) 2025 Prosperity Project
 `timescale 1ns / 1ps
 
+/* verilator lint_off WIDTHEXPAND */
+/* verilator lint_off WIDTHTRUNC */
+/* verilator lint_off PINCONNECTEMPTY */
+
 module top #(
     parameter ROWS         = 256,     // Maximum number of rows per tile
     parameter SPIKES       = 16,      // Number of spikes per pattern
@@ -102,6 +106,8 @@ module top #(
   always @(posedge clk) begin
     if (tile_mem_wr_en) begin
       tile_ram[tile_mem_addr] <= tile_mem_data_in;
+      // Automatically calculate and store popcount
+      popcount_ram[tile_mem_addr] <= $countones(tile_mem_data_in);
     end
     tile_mem_data_out <= tile_ram[tile_mem_addr];
     
@@ -115,7 +121,7 @@ module top #(
   // Control FSM
   // ===================================================================
   
-  always @(posedge clk or negedge rst_n) begin
+  always @(posedge clk) begin
     if (!rst_n) begin
       state <= ST_IDLE;
       row_counter <= 0;
@@ -232,9 +238,9 @@ module top #(
     .tile_mem_addr(tile_mem_addr),
     .tile_mem_data_in(tile_mem_data_in),
     .tile_mem_wr_en(tile_mem_wr_en),
-    .popcount_mem_addr(pc_mem_addr),
-    .popcount_mem_data_in(pc_mem_data_in),
-    .popcount_mem_wr_en(pc_mem_wr_en)
+    .popcount_mem_addr(tile_mem_wr_en ? tile_mem_addr : pc_mem_addr),
+    .popcount_mem_data_in(tile_mem_wr_en ? $countones(tile_mem_data_in) : pc_mem_data_in),
+    .popcount_mem_wr_en(tile_mem_wr_en | pc_mem_wr_en)
   );
 
   // ===================================================================
@@ -256,7 +262,8 @@ module top #(
   pruner #(
     .N(ROWS),
     .M(SPIKES),
-    .NO_WIDTH(NO_WIDTH)
+    .NO_WIDTH(NO_WIDTH),
+    .NULL_ID(8'd255)  // Use 255 as NULL prefix ID for roots
   ) u_pruner (
     .clk(clk),
     .rst_n(rst_n),
@@ -280,7 +287,7 @@ module top #(
     
     // Memory interface – multiplex spike vs NO writes
     .mem_addr(pc_mem_wr_en ? pc_mem_addr : tile_mem_addr),
-    .mem_NO_in(pc_mem_wr_en ? pc_mem_data_in : popcount_ram[tile_mem_addr]),
+    .mem_NO_in(pc_mem_wr_en ? pc_mem_data_in : $countones(tile_mem_data_in)),
     .mem_spike_in(tile_mem_data_in),
     .mem_wr_en(tile_mem_wr_en | pc_mem_wr_en),
     .mem_sel(tile_mem_wr_en ? 1'b1 : 1'b0)  // Use 1 only while writing spikes
@@ -330,7 +337,7 @@ module top #(
   end
   
   // Pipeline registers update
-  always @(posedge clk or negedge rst_n) begin
+  always @(posedge clk) begin
     if (!rst_n) begin
       prn_valid_r <= 0;
       row_idx_r <= 0;

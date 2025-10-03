@@ -10,6 +10,9 @@
 // (c) 2025 Prosperity Project
 `timescale 1ns / 1ps
 
+/* verilator lint_off WIDTHEXPAND */
+/* verilator lint_off UNUSEDPARAM */
+
 module processor #(
     parameter ROWS        = 256,      // Number of rows in tile
     parameter SPIKES      = 16,       // Number of spikes per pattern  
@@ -59,11 +62,18 @@ module processor #(
     localparam ST_CLEAR_BIT  = 3'd5;
     localparam ST_WRITEBACK  = 3'd6;
     
+    // NULL prefix constant (ID 255 indicates no prefix/passthrough mode)
+    localparam NULL_PREFIX_ID = 8'hFF;
+    
     reg [3:0] state, next_state;
     reg [$clog2(ROWS)-1:0] current_row_id;
     reg [$clog2(ROWS)-1:0] current_prefix_id;
     reg [SPIKES-1:0] current_pattern;
     reg [SPIKES-1:0] pattern_working;  // Working copy for bit scanning
+    
+    // NULL prefix detection
+    wire is_null_prefix;
+    assign is_null_prefix = (current_prefix_id == NULL_PREFIX_ID);
     
     // PE Array - 128 Processing Elements
     reg [ACC_WIDTH-1:0] pe_partial_sum [0:PE_COUNT-1];
@@ -167,10 +177,22 @@ module processor #(
                 if (!rst_n) begin
                     pe_partial_sum[i] <= 0;
                 end else if (state == ST_LOAD_PFX) begin
-                    // Load prefix result as starting point directly from input
-                    pe_partial_sum[i] <= output_rd_data[(i+1)*ACC_WIDTH-1:i*ACC_WIDTH];
-                end else if (state == ST_ACCUMULATE && spike_valid) begin
-                    // MAC operation: add weight when spike is active
+                    if (is_null_prefix) begin
+                        // NULL prefix mode: Output the input pattern bits directly
+                        // Map pattern bits to PE outputs (16 pattern bits -> 128 PEs)
+                        // Each pattern bit maps to 8 consecutive PEs (128/16 = 8)
+                        if (i < SPIKES * (PE_COUNT/SPIKES)) begin
+                            // Extract the corresponding pattern bit for this PE group
+                            pe_partial_sum[i] <= current_pattern[i / (PE_COUNT/SPIKES)] ? 16'h0001 : 16'h0000;
+                        end else begin
+                            pe_partial_sum[i] <= 16'h0000;
+                        end
+                    end else begin
+                        // Normal mode: Load prefix result as starting point
+                        pe_partial_sum[i] <= output_rd_data[(i+1)*ACC_WIDTH-1:i*ACC_WIDTH];
+                    end
+                end else if (state == ST_ACCUMULATE && spike_valid && !is_null_prefix) begin
+                    // MAC operation: add weight when spike is active (skip if NULL prefix)
                     pe_partial_sum[i] <= pe_partial_sum[i] + pe_weight_extended;
                 end
             end
@@ -244,7 +266,12 @@ module processor #(
             end
             
             ST_LOAD_PFX: begin
-                next_state = ST_DECODE; // Always transition after one cycle
+                // For NULL prefix, skip directly to writeback (passthrough mode)
+                if (is_null_prefix) begin
+                    next_state = ST_WRITEBACK;
+                end else begin
+                    next_state = ST_DECODE; // Normal processing
+                end
             end
             
             ST_DECODE: begin
@@ -293,6 +320,12 @@ module processor #(
                         current_pattern <= task_pattern;
                         pattern_working <= task_pattern;
                         prefix_loaded <= 1'b0;
+                        
+                        // Debug print for NULL prefix detection
+                        if (task_prefix_id == NULL_PREFIX_ID) begin
+                            $display("[PROCESSOR] NULL PREFIX detected: row=%0d, pattern=0x%04x", 
+                                   task_row_id, task_pattern);
+                        end
                     end
                     pe_accumulate_en <= 1'b0;
                     writeback_en <= 1'b0;
@@ -333,6 +366,14 @@ module processor #(
                 ST_WRITEBACK: begin
                     writeback_en <= 1'b1;
                     pe_accumulate_en <= 1'b0;
+                    
+                    // Debug print for NULL prefix writeback
+                    if (is_null_prefix) begin
+                        $display("[PROCESSOR] NULL PREFIX writeback: row=%0d, pattern=0x%04x -> PE[0:7]=0x%04x_%04x_%04x_%04x_%04x_%04x_%04x_%04x", 
+                               current_row_id, current_pattern,
+                               pe_partial_sum[7], pe_partial_sum[6], pe_partial_sum[5], pe_partial_sum[4],
+                               pe_partial_sum[3], pe_partial_sum[2], pe_partial_sum[1], pe_partial_sum[0]);
+                    end
                 end
                 
                 default: begin

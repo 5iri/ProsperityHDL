@@ -3,10 +3,15 @@
 `timescale 1ns / 1ps
 `default_nettype none
 
+/* verilator lint_off WIDTHTRUNC */
+/* verilator lint_off WIDTHEXPAND */
+/* verilator lint_off UNUSEDPARAM */
+
 module pruner #(
     parameter N        = 256,
     parameter M        = 16,
-    parameter NO_WIDTH = 8
+    parameter NO_WIDTH = 8,
+    parameter NULL_ID  = 8'd255  // NULL prefix ID for roots
 ) (
     input wire clk,
     input wire rst_n,
@@ -51,6 +56,7 @@ module pruner #(
     reg  [$clog2(N)-1:0] row_idx_r;
     reg  [ NO_WIDTH-1:0] row_NO_r;
     reg  [        M-1:0] cur_spikes_r;
+    reg                  has_prefix_r;   // Track if we found a valid prefix
 
     // ───────────────────── Internal buffers ───────────────────
     reg [NO_WIDTH-1:0] NO_table [0:N-1];
@@ -64,11 +70,11 @@ module pruner #(
     generate
         for (g = 0; g < N; g = g + 1) begin : GEN_VALID
             /* verilator lint_off CMPCONST */
-            assign valid_mask[g] = si_vec_r[g] && (g != row_idx_r) && (
-                // Partial-match: proper subset, smaller NO
+            assign valid_mask[g] = (g != row_idx_r) && (  // Match golden model exactly
+                // Partial-match: proper subset, smaller popcount
                 ( (NO_table[g] <  row_NO_r) &&
                                    ((spike_matrix[g] & cur_spikes_r) == spike_matrix[g]) ) ||
-                // Exact-match: identical pattern, smaller index
+                // Exact-match: identical pattern, earlier index (EM rule)
                 ( (NO_table[g] == row_NO_r) &&
                                    (spike_matrix[g] == cur_spikes_r) && (g < row_idx_r) )
                                );
@@ -114,7 +120,7 @@ module pruner #(
                 end
                 default: begin
                     if (NO_table[2*i] > NO_table[2*i+1] ||
-               (NO_table[2*i]==NO_table[2*i+1] && 2*i < 2*i+1)) begin
+               (NO_table[2*i]==NO_table[2*i+1] && 2*i > 2*i+1)) begin
                         best_idx_lvl0[i] = 2 * i;
                         best_NO_lvl0[i]  = NO_table[2*i];
                     end else begin
@@ -129,7 +135,7 @@ module pruner #(
         for (i = 0; i < N / 4; i = i + 1) begin
             if (best_NO_lvl0[2*i] > best_NO_lvl0[2*i+1] ||
            (best_NO_lvl0[2*i]==best_NO_lvl0[2*i+1] &&
-            best_idx_lvl0[2*i]<best_idx_lvl0[2*i+1])) begin
+            best_idx_lvl0[2*i]>best_idx_lvl0[2*i+1])) begin
                 best_idx_lvl1[i] = best_idx_lvl0[2*i];
                 best_NO_lvl1[i]  = best_NO_lvl0[2*i];
             end else begin
@@ -142,7 +148,7 @@ module pruner #(
         for (i = 0; i < N / 8; i = i + 1) begin
             if (best_NO_lvl1[2*i] > best_NO_lvl1[2*i+1] ||
            (best_NO_lvl1[2*i]==best_NO_lvl1[2*i+1] &&
-            best_idx_lvl1[2*i]<best_idx_lvl1[2*i+1])) begin
+            best_idx_lvl1[2*i]>best_idx_lvl1[2*i+1])) begin
                 best_idx_lvl2[i] = best_idx_lvl1[2*i];
                 best_NO_lvl2[i]  = best_NO_lvl1[2*i];
             end else begin
@@ -156,7 +162,7 @@ module pruner #(
         best_NO_r  = best_NO_lvl2[0];
         for (i = 1; i < N / 8; i = i + 1) begin
             if (best_NO_lvl2[i] > best_NO_r ||
-           (best_NO_lvl2[i] == best_NO_r && best_idx_lvl2[i] < best_idx_r)) begin
+           (best_NO_lvl2[i] == best_NO_r && best_idx_lvl2[i] > best_idx_r)) begin
                 best_idx_r = best_idx_lvl2[i];
                 best_NO_r  = best_NO_lvl2[i];
             end
@@ -167,7 +173,7 @@ module pruner #(
     // ───────────────────── ready / FSM control ────────────────
     assign pruner_ready = (state == S_IDLE);
 
-    always @(posedge clk or negedge rst_n) begin
+    always @(posedge clk) begin
         if (!rst_n) begin
             state <= S_IDLE;
             prune_valid <= 1'b0;
@@ -200,16 +206,22 @@ module pruner #(
                     if (|cand_mask_r) begin
                         prefix_id    <= best_idx_r;
                         pre_spikes_r <= spike_matrix[best_idx_r];
+                        has_prefix_r <= 1'b1;
                     end else begin
-                        prefix_id    <= row_idx_r;  // fallback self-prefix
-                        pre_spikes_r <= cur_spikes_r;
+                        prefix_id    <= row_idx_r;   // Use self as prefix for roots (PROS_NULL="row")
+                        pre_spikes_r <= cur_spikes_r; // Self pattern 
+                        has_prefix_r <= 1'b1;       // Treat as having prefix (self)
                     end
                     state <= S_XOR;
                 end
 
                 /* -------------------------------------------------- */
                 S_XOR: begin
-                    pattern     <= cur_spikes_r ^ pre_spikes_r;
+                    if (has_prefix_r) begin
+                        pattern <= cur_spikes_r ^ pre_spikes_r;  // Normal prefix case
+                    end else begin
+                        pattern <= cur_spikes_r;                 // Root case: residual = row_pattern
+                    end
                     row_id_out  <= row_idx_r;  // === new: emit correct row index
                     prune_valid <= 1'b1;
                     state       <= S_OUT;
@@ -254,7 +266,7 @@ module pruner #(
     reg                   st0_valid, st1_valid, st2_valid;
 
     // Stage-0 : latch detector result
-    always @(posedge clk or negedge rst_n) begin
+    always @(posedge clk) begin
         if (!rst_n) begin
             st0_valid <= 1'b0;
         end else begin
@@ -273,53 +285,78 @@ module pruner #(
     reg [$clog2(N)-1:0] best_idx_comb;
     reg [NO_WIDTH-1:0]  best_no_comb;
     reg [M-1:0]         best_spikes_comb;
+    reg                 has_prefix_comb;
 
     always @(*) begin
-        best_idx_comb    = st0_row_idx;  // default self-prefix
-        best_no_comb     = 0;
-        best_spikes_comb = st0_row_spikes;
-        for (j = 0; j < N; j = j + 1) begin
-            if (st0_valid && st0_si_vec[j] && (j != st0_row_idx) && (
-                ((NO_table[j] <  st0_row_NO) && ((spike_matrix[j] & st0_row_spikes) == spike_matrix[j])) ||
-                ((NO_table[j] == st0_row_NO) && (spike_matrix[j] == st0_row_spikes) && (j < st0_row_idx))
+        // Initialize: no prefix found  
+        best_idx_comb    = NULL_ID;      // Use NULL_ID when no prefix found
+        best_no_comb     = 0;            
+        best_spikes_comb = {M{1'b0}};    // Zero pattern for NULL prefix
+        has_prefix_comb  = 1'b0;
+        
+        // Search for valid prefix candidates - match golden model policy exactly  
+        for (j = 0; j < N; j = j + 1) begin            
+            if (st0_valid && (j != st0_row_idx) && (
+                // PM: proper subset with smaller popcount (any index allowed)
+                ((NO_table[j] < st0_row_NO) && ((spike_matrix[j] & st0_row_spikes) == spike_matrix[j])) ||
+                // EM: equal popcount, exact match, earlier index only
+                ((j < st0_row_idx) && (NO_table[j] == st0_row_NO) && (spike_matrix[j] == st0_row_spikes))
             )) begin
-                if (NO_table[j] > best_no_comb ||
-                   (NO_table[j] == best_no_comb && j < best_idx_comb)) begin
+                // Select largest popcount; tie-break by largest index (for EM case)  
+                if (!has_prefix_comb || 
+                    NO_table[j] > best_no_comb ||
+                    (NO_table[j] == best_no_comb && j[$clog2(N)-1:0] > best_idx_comb)) begin
+                    
+                    
                     best_idx_comb    = j[$clog2(N)-1:0];
                     best_no_comb     = NO_table[j];
                     best_spikes_comb = spike_matrix[j];
+                    has_prefix_comb  = 1'b1;
                 end
             end
         end
+        
+        
     end
 
     // Stage-1 : register selection results
-    always @(posedge clk or negedge rst_n) begin
+    reg st1_has_prefix;
+    always @(posedge clk) begin
         if (!rst_n) begin
             st1_valid <= 1'b0;
+            st1_has_prefix <= 1'b0;
         end else begin
             st1_valid        <= st0_valid;
             st1_row_idx      <= st0_row_idx;
             st1_row_spikes   <= st0_row_spikes;
             st1_prefix_idx   <= best_idx_comb;
             st1_pre_spikes   <= best_spikes_comb;
+            st1_has_prefix   <= has_prefix_comb;
         end
     end
 
     // Stage-2 : XOR and handshake to dispatcher
-    always @(posedge clk or negedge rst_n) begin
+    reg st2_has_prefix;
+    always @(posedge clk) begin
         if (!rst_n) begin
             st2_valid <= 1'b0;
+            st2_has_prefix <= 1'b0;
             prune_valid <= 1'b0;
             row_id_out  <= 0;
             prefix_id   <= 0;
             pattern     <= 0;
         end else begin
             st2_valid <= st1_valid;
+            st2_has_prefix <= st1_has_prefix;
             if (st1_valid) begin
                 st2_row_idx    <= st1_row_idx;
                 st2_prefix_idx <= st1_prefix_idx;
-                st2_pattern    <= st1_row_spikes ^ st1_pre_spikes;
+                // Root vs prefix XOR handling
+                if (st1_has_prefix) begin
+                    st2_pattern <= st1_row_spikes ^ st1_pre_spikes;  // Normal case
+                end else begin
+                    st2_pattern <= st1_row_spikes;  // Root: residual = row_pattern
+                end
             end
 
             // Drive outputs when dispatcher ready
@@ -336,7 +373,7 @@ module pruner #(
 
     // Simple done pulse after N tasks
     reg [$clog2(N+1)-1:0] out_count;
-    always @(posedge clk or negedge rst_n) begin
+    always @(posedge clk) begin
         if (!rst_n) begin
             out_count  <= 0;
             prune_done <= 0;

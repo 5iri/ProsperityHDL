@@ -9,6 +9,9 @@
 //
 // --------------------------------------------------------------------
 `timescale 1ns / 1ps
+`default_nettype none
+
+/* verilator lint_off WIDTHEXPAND */
 
 module detector #(
     parameter SPIKES = 16,  // Number of spikes per pattern
@@ -31,7 +34,7 @@ module detector #(
 
     // Additional interface signals for top module
     input  wire [$clog2(ROWS)-1:0] row_idx,            // Current row index
-    output reg  [    NO_WIDTH-1:0] row_popcnt,         // Popcount for current row
+    output wire [    NO_WIDTH-1:0] row_popcnt,         // Popcount for current row
     output reg                     detector_init_done,  // Initialization complete
 
     // Single-port RAM interface for tile_buffer and row_popcounts
@@ -179,7 +182,6 @@ module detector #(
       initialized <= 0;
       query_in_progress <= 0;
       popcounts_calculated <= 0;
-      row_popcnt <= 0;
       detector_init_done <= 0;
     end else begin
       state <= next_state;
@@ -218,6 +220,7 @@ module detector #(
             det_done <= 1'b1;  // Signal detection complete
           end else begin
             query_in_progress <= 1'b1;
+            // Popcount output is now combinational (see assign statement)
           end
         end
       endcase
@@ -236,6 +239,9 @@ module detector #(
   reg [SPIKES-1:0] tile_mem_data_out; // INTERNAL
   reg [NO_WIDTH-1:0] popcount_mem_data_out; // INTERNAL
 
+  // Combinational outputs
+  assign row_popcnt = row_popcounts[row_idx];  // Always output popcount for current row_idx
+  
   always @(*) begin
     tile_mem_data_out = tile_buffer[tile_mem_addr];
     popcount_mem_data_out = row_popcounts[popcount_mem_addr];

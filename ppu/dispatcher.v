@@ -9,6 +9,9 @@
 `timescale 1ns / 1ps
 `default_nettype none
 
+/* verilator lint_off WIDTHTRUNC */
+/* verilator lint_off WIDTHEXPAND */
+
 module dispatcher #(
     parameter integer ROWS          = 256,
     parameter integer SPIKES        = 16,
@@ -88,9 +91,29 @@ module dispatcher #(
     reg [31:0] i;
     reg [31:0] j;
     reg [$clog2(ROWS)-1:0] current_row;
-    integer min_idx_found;
-    integer min_pc_found;
-    integer min_row_found;
+    
+    // Combinational minimum finding signals
+    reg [$clog2(ROWS+1)-1:0] min_idx_found;
+    reg [     NO_WIDTH-1:0] min_pc_found;
+    reg [        IDX_W-1:0] min_row_found;
+
+    // Combinational logic to find minimum element for sorting
+    always @(*) begin
+        min_idx_found = sort_count;
+        min_pc_found  = (sort_count < ROWS) ? sort_popcnt[sort_count] : 0;
+        min_row_found = (sort_count < ROWS) ? sort_row_id[sort_count] : 0;
+        
+        for (i = 0; i < ROWS; i = i + 1) begin
+            if (i > sort_count && i < collect_count) begin
+                if (sort_popcnt[i] < min_pc_found ||
+                    (sort_popcnt[i] == min_pc_found && sort_row_id[i] < min_row_found)) begin
+                    min_idx_found = i;
+                    min_pc_found  = sort_popcnt[i];
+                    min_row_found = sort_row_id[i];
+                end
+            end
+        end
+    end
 
     // ═════════════════════════════════════════════════════════════════════
     //  FSM Logic
@@ -125,7 +148,7 @@ module dispatcher #(
     // ═════════════════════════════════════════════════════════════════════
     //  Main Sequential Logic
     // ═════════════════════════════════════════════════════════════════════
-    always @(posedge clk or negedge rst_n) begin
+    always @(posedge clk) begin
         if (!rst_n) begin
             state <= S_IDLE;
             collect_count <= 0;
@@ -231,79 +254,40 @@ module dispatcher #(
                 end
 
                 S_SORT: begin
-                    // Three-stage selection sort to handle non-blocking assignment timing
+                    // Simplified selection sort using combinational minimum finder
                     if (sort_count < collect_count) begin
-                        // Use local variables for sorting (already declared at top)
-                        case (sort_stage)
-                            2'd0: begin
-                                // Stage 0: Find minimum from sort_count to collect_count-1
-                                min_idx_found = sort_count;
-                                min_pc_found  = sort_popcnt[sort_count];
-                                min_row_found = sort_row_id[sort_count];
-
-                                // Search among collected rows
-                                for (i = 0; i < ROWS; i = i + 1) begin
-                                    if (i >= sort_count + 1 && i < collect_count) begin
-                                        if (sort_popcnt[i] < min_pc_found ||
-                                            (sort_popcnt[i] == min_pc_found && sort_row_id[i] < min_row_found)) begin
-                                            min_idx_found = i;
-                                            min_pc_found  = sort_popcnt[i];
-                                            min_row_found = sort_row_id[i];
-                                        end
-                                    end
-                                end
-
-                                // Store found minimum for next stage
-                                // (No need to assign to state variables)
-
-                                if (min_idx_found != sort_count) begin
-                                    sort_stage <= 2'd1;  // Need swap, go to temp storage stage
-                                    // Save min_idx_found, min_pc_found, min_row_found in temp regs for next stage
-                                    sort_temp_pc <= min_pc_found;
-                                    sort_temp_row <= min_row_found;
-                                    // Save index for swap
-                                    temp_pc <= min_idx_found;
-                                end else begin
-                                    sort_count <= sort_count + 1;  // No swap needed, advance
-                                    sort_stage <= 2'd0;
-                                end
-                            end
-
-                            2'd1: begin
-                                // Stage 1: Store current values in temporary variables
-                                // Already done in previous stage
-                                sort_stage <= 2'd2;  // Move to swap stage
-                            end
-
-                            2'd2: begin
-                                // Stage 2: Perform the actual swap
-                                // Use temp_pc as min_idx_found
-                                sort_popcnt[sort_count] <= sort_temp_pc;
-                                sort_row_id[sort_count] <= sort_temp_row;
-                                sort_popcnt[temp_pc] <= sort_popcnt[sort_count];
-                                sort_row_id[temp_pc] <= sort_row_id[sort_count];
-
-                                // Move to next position
-                                sort_count <= sort_count + 1;
-                                sort_stage <= 2'd0;  // Back to find stage
-                            end
-
-                            default: begin
-                                sort_stage <= 2'd0;
-                            end
-                        endcase
+                        if (min_idx_found != sort_count) begin
+                            // Need to swap - save values in temporaries
+                            sort_temp_pc <= sort_popcnt[sort_count];
+                            sort_temp_row <= sort_row_id[sort_count];
+                            temp_pc <= sort_count;  // Store current position
+                            
+                            // Do the swap
+                            sort_popcnt[sort_count] <= min_pc_found;
+                            sort_row_id[sort_count] <= min_row_found;
+                            sort_popcnt[min_idx_found] <= sort_popcnt[sort_count];
+                            sort_row_id[min_idx_found] <= sort_row_id[sort_count];
+                        end
+                        
+                        // Move to next position
+                        sort_count <= sort_count + 1;
+                    end else begin
+                        // Sorting complete, move to dispatch
+                        sort_count <= 0;
                     end
                 end
 
                 S_DISPATCH: begin
                     if (proc_ready && dispatch_count < collect_count) begin
-                        current_row = sort_row_id[dispatch_count];
-
-                        if (pst_valid[current_row]) begin
+                        // Use combinational lookup to avoid timing issues
+                        current_row <= sort_row_id[dispatch_count];
+                        
+                        // Use direct indexing instead of delayed current_row
+                        if (pst_valid[sort_row_id[dispatch_count]]) begin
                             task_valid <= 1'b1;
-                            task_row_id <= current_row;
-                            task_prefix_id <= pst_prefix_id[current_row];
-                            task_pattern <= pst_pattern[current_row];
+                            task_row_id <= sort_row_id[dispatch_count];
+                            task_prefix_id <= pst_prefix_id[sort_row_id[dispatch_count]];
+                            task_pattern <= pst_pattern[sort_row_id[dispatch_count]];
 
                             dispatch_count <= dispatch_count + 1;
                         end else begin
