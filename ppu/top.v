@@ -24,7 +24,12 @@ module top #(
     parameter NO_WIDTH     = 8,       // Width of number-of-ones counter (log2(SPIKES)+1)
     parameter PE_COUNT     = 128,     // Number of Processing Elements
     parameter WEIGHT_WIDTH = 8,       // Weight precision
-    parameter ACC_WIDTH    = 16       // Accumulator width
+    parameter ACC_WIDTH    = 16,      // Accumulator width
+    // LIF Neuron Parameters
+    parameter VMEM_WIDTH    = 16,     // Membrane potential width
+    parameter THRESH_WIDTH  = 16,     // Threshold width
+    parameter LEAK_WIDTH    = 8,      // Leak value width
+    parameter REFRAC_WIDTH  = 4       // Refractory counter width
 ) (
     // Clock and Reset
     input  wire clk,
@@ -59,8 +64,8 @@ module top #(
     output wire [SPIKES-1:0]       task_pattern,   // Spike pattern
     
     // Weight Memory Interface (for 128 PEs)
-    output wire [$clog2(SPIKES)-1:0] weight_addr,
-    input  wire [PE_COUNT*WEIGHT_WIDTH-1:0] weight_data,
+    output wire [$clog2(SPIKES*PE_COUNT)-1:0] weight_addr,
+    input  wire [WEIGHT_WIDTH-1:0] weight_data,
     output wire                      weight_rd_en,
     
     // Output Buffer Interface
@@ -69,6 +74,27 @@ module top #(
     input  wire [PE_COUNT*ACC_WIDTH-1:0] output_rd_data,
     output wire [PE_COUNT*ACC_WIDTH-1:0] output_wr_data,
     output wire                       output_wr_en,
+
+    // ─────────────────── LIF Neuron Configuration ───────────────────
+    input  wire [THRESH_WIDTH-1:0]  cfg_lif_threshold,     // Firing threshold
+    input  wire [LEAK_WIDTH-1:0]    cfg_lif_leak,          // Leak per timestep
+    input  wire [VMEM_WIDTH-1:0]    cfg_lif_reset,         // Reset potential after spike
+    input  wire [REFRAC_WIDTH-1:0]  cfg_lif_refractory,    // Refractory period
+    input  wire                     cfg_lif_enable,        // Enable LIF neuron updates
+    input  wire                     timestep_end,          // Signal end of timestep
+
+    // ─────────────────── Spike Output Interface ─────────────────────
+    output wire [PE_COUNT-1:0]      spike_out,             // Output spike vector from processor
+    output wire                     spike_valid,           // Spike output valid
+    output wire [$clog2(ROWS)-1:0]  spike_row_id,          // Row ID for current spikes
+
+    // Spike Buffer Interface
+    input  wire [$clog2(ROWS)-1:0]  spike_buf_rd_addr,     // Read address for spike buffer
+    output wire [PE_COUNT-1:0]      spike_buf_rd_data,     // Spike data at read address
+
+    // Debug: Membrane potential readback
+    input  wire [$clog2(PE_COUNT)-1:0] vmem_rd_idx,
+    output wire [VMEM_WIDTH-1:0]       vmem_rd_data,
     
     // Debug Signals
     output wire [3:0]              dbg_state,      // Debug: FSM state
@@ -390,11 +416,13 @@ module top #(
   // Only one dispatcher instance above. Any other instance below this comment will be removed.
   
   // ===================================================================
-  // Processor Interface (128 PEs)
+  // Processor Interface (128 PEs with Integrated LIF Neurons)
   // ===================================================================
   wire proc_ready;
   wire proc_busy;
   wire proc_done;
+  wire [PE_COUNT-1:0] proc_spike_out;
+  wire proc_spike_valid;
   
   // Processor instance
   processor #(
@@ -403,7 +431,11 @@ module top #(
     .PE_COUNT(PE_COUNT),
     .WEIGHT_WIDTH(WEIGHT_WIDTH),
     .ACC_WIDTH(ACC_WIDTH),
-    .NO_WIDTH(NO_WIDTH)
+    .NO_WIDTH(NO_WIDTH),
+    .VMEM_WIDTH(VMEM_WIDTH),
+    .THRESH_WIDTH(THRESH_WIDTH),
+    .LEAK_WIDTH(LEAK_WIDTH),
+    .REFRAC_WIDTH(REFRAC_WIDTH)
   ) u_processor (
     .clk(clk),
     .rst_n(rst_n),
@@ -426,6 +458,24 @@ module top #(
     .output_rd_data(output_rd_data),
     .output_wr_data(output_wr_data),
     .output_wr_en(output_wr_en),
+
+    // LIF Neuron Configuration
+    .cfg_threshold(cfg_lif_threshold),
+    .cfg_leak(cfg_lif_leak),
+    .cfg_reset_potential(cfg_lif_reset),
+    .cfg_refractory(cfg_lif_refractory),
+
+    // LIF Control
+    .lif_enable(cfg_lif_enable),
+    .timestep_end(timestep_end),
+
+    // Spike Output
+    .spike_out(proc_spike_out),
+    .spike_valid(proc_spike_valid),
+
+    // Debug: Membrane readback
+    .vmem_rd_idx(vmem_rd_idx),
+    .vmem_rd_data(vmem_rd_data),
     
     // Status
     .proc_busy(proc_busy),
@@ -434,6 +484,28 @@ module top #(
   
   // Connect processor ready signal to dispatcher
   assign core_ready = proc_ready;
+
+  // ===================================================================
+  // Spike Buffer - Store spikes per row for next layer / host readback
+  // ===================================================================
+  reg [PE_COUNT-1:0] spike_buffer [0:ROWS-1];
+  reg [$clog2(ROWS)-1:0] spike_row_id_r;
+
+  // Write spikes to buffer when processor outputs valid spikes
+  always @(posedge clk) begin
+    if (!rst_n) begin
+      spike_row_id_r <= 0;
+    end else if (proc_spike_valid && output_wr_en) begin
+      spike_buffer[output_wr_addr] <= proc_spike_out;
+      spike_row_id_r <= output_wr_addr;
+    end
+  end
+
+  // Spike output signals
+  assign spike_out = proc_spike_out;
+  assign spike_valid = proc_spike_valid;
+  assign spike_row_id = spike_row_id_r;
+  assign spike_buf_rd_data = spike_buffer[spike_buf_rd_addr];
   
   // Status outputs
   assign tile_done = dsp_tile_done;

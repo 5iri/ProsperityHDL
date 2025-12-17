@@ -1,6 +1,7 @@
-// processor.v -- Prosperity PPU Processor (128 PE Array)
+// processor.v -- Prosperity PPU Processor (128 PE Array with Integrated LIF Neurons)
 // Implements ProSparsity-based matrix computation with:
-//   - 128 Processing Elements (8-bit adders)
+//   - 128 Processing Elements (8-bit weights, 16-bit accumulators)
+//   - Integrated LIF neurons per PE for direct spike generation
 //   - Row-wise dataflow processing
 //   - Prefix result reuse for product sparsity
 //   - Address decoder with bit scan forward
@@ -19,7 +20,12 @@ module processor #(
     parameter PE_COUNT    = 128,      // Number of Processing Elements
     parameter WEIGHT_WIDTH = 8,       // Weight precision (8-bit)
     parameter ACC_WIDTH   = 16,       // Accumulator width (16-bit for overflow protection)
-    parameter NO_WIDTH    = 8         // Popcount width
+    parameter NO_WIDTH    = 8,        // Popcount width
+    // LIF Neuron Parameters
+    parameter VMEM_WIDTH    = 16,     // Membrane potential width
+    parameter THRESH_WIDTH  = 16,     // Threshold width  
+    parameter LEAK_WIDTH    = 8,      // Leak value width
+    parameter REFRAC_WIDTH  = 4       // Refractory counter width
 ) (
     // Clock and Reset
     input  wire clk,
@@ -37,12 +43,30 @@ module processor #(
     input  wire [WEIGHT_WIDTH-1:0] weight_data,              // Single weight per cycle
     output wire                    weight_rd_en,
 
-    // Output Buffer Interface
+    // Output Buffer Interface (accumulator values)
     output wire [$clog2(ROWS)-1:0]     output_rd_addr,
     output wire [$clog2(ROWS)-1:0]     output_wr_addr,
     input  wire [PE_COUNT*ACC_WIDTH-1:0] output_rd_data,
     output wire [PE_COUNT*ACC_WIDTH-1:0] output_wr_data,
     output wire                        output_wr_en,
+
+    // LIF Neuron Configuration
+    input  wire [THRESH_WIDTH-1:0]     cfg_threshold,        // Firing threshold
+    input  wire [LEAK_WIDTH-1:0]       cfg_leak,             // Leak per timestep
+    input  wire [VMEM_WIDTH-1:0]       cfg_reset_potential,  // Reset value after spike
+    input  wire [REFRAC_WIDTH-1:0]     cfg_refractory,       // Refractory period
+
+    // LIF Control
+    input  wire                        lif_enable,           // Enable LIF neuron updates
+    input  wire                        timestep_end,         // Signal end of timestep (apply leak)
+
+    // Spike Output Interface
+    output wire [PE_COUNT-1:0]         spike_out,            // Output spike vector
+    output reg                         spike_valid,          // Spike output valid
+
+    // Debug: Membrane potential readback
+    input  wire [$clog2(PE_COUNT)-1:0] vmem_rd_idx,
+    output wire [VMEM_WIDTH-1:0]       vmem_rd_data,
 
     // Status
     output wire                        proc_busy,
@@ -54,13 +78,14 @@ module processor #(
     // ===================================================================
     
     // FSM States
-    localparam ST_IDLE       = 3'd0;
-    localparam ST_LOAD_WEIGHTS = 3'd1;
-    localparam ST_LOAD_PFX   = 3'd2;
-    localparam ST_DECODE     = 3'd3;
-    localparam ST_ACCUMULATE = 3'd4;
-    localparam ST_CLEAR_BIT  = 3'd5;
-    localparam ST_WRITEBACK  = 3'd6;
+    localparam ST_IDLE       = 4'd0;
+    localparam ST_LOAD_WEIGHTS = 4'd1;
+    localparam ST_LOAD_PFX   = 4'd2;
+    localparam ST_DECODE     = 4'd3;
+    localparam ST_ACCUMULATE = 4'd4;
+    localparam ST_CLEAR_BIT  = 4'd5;
+    localparam ST_LIF_UPDATE = 4'd6;   // NEW: Apply LIF neuron dynamics
+    localparam ST_WRITEBACK  = 4'd7;
     
     // NULL prefix constant (ID 255 indicates no prefix/passthrough mode)
     localparam NULL_PREFIX_ID = 8'hFF;
@@ -87,7 +112,10 @@ module processor #(
     reg weight_loading;
     reg weights_loaded;
     
-    // Delayed indices for proper weight storage timing
+    // Two-stage pipeline for weight storage indices (to match registered weight_data)
+    reg [$clog2(PE_COUNT)-1:0] weight_store_pe_idx_d1;
+    reg [$clog2(SPIKES)-1:0] weight_store_spike_idx_d1;
+    reg weight_store_valid_d1;
     reg [$clog2(PE_COUNT)-1:0] weight_store_pe_idx;
     reg [$clog2(SPIKES)-1:0] weight_store_spike_idx;
     reg weight_store_valid;
@@ -95,8 +123,15 @@ module processor #(
     
     // Address Decoder Signals
     reg [$clog2(SPIKES)-1:0] current_spike_idx;
-    reg spike_valid;
+    reg spike_valid_decode;
     wire pattern_empty;
+
+    // LIF Neuron Signals (directly in processor)
+    wire [PE_COUNT-1:0] lif_spike_out;
+    wire [VMEM_WIDTH-1:0] lif_vmem_out [0:PE_COUNT-1];
+    wire [PE_COUNT-1:0] lif_in_refractory;
+    reg lif_update_en;
+    reg lif_input_valid;
     
     // Memory Interfaces
     reg [PE_COUNT*ACC_WIDTH-1:0] prefix_result;
@@ -112,6 +147,15 @@ module processor #(
                                          {($clog2(SPIKES*PE_COUNT)){1'b0}}; // Not used during computation
     assign weight_rd_en = weight_loading; // Only read during weight loading, not during computation
     
+    // Register incoming weight data to avoid race conditions with combinational memory
+    reg [WEIGHT_WIDTH-1:0] weight_data_reg;
+    always @(posedge clk) begin
+        if (!rst_n)
+            weight_data_reg <= {WEIGHT_WIDTH{1'b0}};
+        else
+            weight_data_reg <= weight_data;
+    end
+    
     // Weight loading logic
     always @(posedge clk) begin
         if (!rst_n) begin
@@ -119,6 +163,9 @@ module processor #(
             weights_loaded <= 1'b0;
             weight_load_pe_idx <= 0;
             weight_load_spike_idx <= 0;
+            weight_store_pe_idx_d1 <= 0;
+            weight_store_spike_idx_d1 <= 0;
+            weight_store_valid_d1 <= 1'b0;
             weight_store_pe_idx <= 0;
             weight_store_spike_idx <= 0;
             weight_store_valid <= 1'b0;
@@ -127,15 +174,19 @@ module processor #(
             if (!weights_loaded) begin
                 weight_loading <= 1'b1;
                 
-                // Store weight data using delayed indices (one cycle behind current)
+                // Store registered weight data using delayed indices (two cycles behind current)
+                // Pipeline: load_idx -> store_idx_d1 -> store_idx (used with weight_data_reg)
                 if (weight_store_valid) begin
-                    weight_buffer[weight_store_pe_idx][weight_store_spike_idx] <= weight_data;
+                    weight_buffer[weight_store_pe_idx][weight_store_spike_idx] <= weight_data_reg;
                 end
                 
-                // Update delayed storage indices to current load indices
-                weight_store_pe_idx <= weight_load_pe_idx;
-                weight_store_spike_idx <= weight_load_spike_idx;
-                weight_store_valid <= weight_loading; // Valid after first cycle
+                // Two-stage pipeline for indices to match the data register delay
+                weight_store_pe_idx <= weight_store_pe_idx_d1;
+                weight_store_spike_idx <= weight_store_spike_idx_d1;
+                weight_store_pe_idx_d1 <= weight_load_pe_idx;
+                weight_store_spike_idx_d1 <= weight_load_spike_idx;
+                weight_store_valid <= weight_store_valid_d1;
+                weight_store_valid_d1 <= weight_loading; // Valid after first cycle
                 
                 // Increment load indices for next address generation
                 if (weight_loading) begin
@@ -161,7 +212,7 @@ module processor #(
         for (i = 0; i < PE_COUNT; i = i + 1) begin : pe_array
             // Assign current weight for active spike
             always @(*) begin
-                if (spike_valid)
+                if (spike_valid_decode)
                     pe_weight[i] = weight_buffer[i][current_spike_idx];
                 else
                     pe_weight[i] = {WEIGHT_WIDTH{1'b0}};
@@ -191,13 +242,47 @@ module processor #(
                         // Normal mode: Load prefix result as starting point
                         pe_partial_sum[i] <= output_rd_data[(i+1)*ACC_WIDTH-1:i*ACC_WIDTH];
                     end
-                end else if (state == ST_ACCUMULATE && spike_valid && !is_null_prefix) begin
+                end else if (state == ST_ACCUMULATE && spike_valid_decode && !is_null_prefix) begin
                     // MAC operation: add weight when spike is active (skip if NULL prefix)
                     pe_partial_sum[i] <= pe_partial_sum[i] + pe_weight_extended;
                 end
             end
+
+            // ─────────────────────────────────────────────────────────────
+            // LIF Neuron Instance per PE
+            // ─────────────────────────────────────────────────────────────
+            lif #(
+                .INPUT_WIDTH  (ACC_WIDTH),
+                .VMEM_WIDTH   (VMEM_WIDTH),
+                .THRESH_WIDTH (THRESH_WIDTH),
+                .LEAK_WIDTH   (LEAK_WIDTH),
+                .REFRAC_WIDTH (REFRAC_WIDTH)
+            ) u_lif (
+                .clk                (clk),
+                .rst_n              (rst_n),
+                // Configuration
+                .cfg_threshold      (cfg_threshold),
+                .cfg_leak           (cfg_leak),
+                .cfg_reset_potential(cfg_reset_potential),
+                .cfg_refractory     (cfg_refractory),
+                // Synaptic input from accumulator
+                .synaptic_input     ($signed(pe_partial_sum[i])),
+                .input_valid        (lif_input_valid),
+                // Control
+                .update_en          (lif_update_en),
+                // Outputs
+                .spike_out          (lif_spike_out[i]),
+                .vmem_out           (lif_vmem_out[i]),
+                .in_refractory      (lif_in_refractory[i])
+            );
         end
     endgenerate
+
+    // Spike output vector
+    assign spike_out = lif_spike_out;
+
+    // Membrane potential readback for debug
+    assign vmem_rd_data = lif_vmem_out[vmem_rd_idx];
     
     // ===================================================================
     // Address Decoder with Bit Scan Forward
@@ -207,11 +292,11 @@ module processor #(
     integer bit_idx;
     always @(*) begin
         current_spike_idx = {$clog2(SPIKES){1'b0}};
-        spike_valid = 1'b0;
+        spike_valid_decode = 1'b0;
         for (bit_idx = 0; bit_idx < SPIKES; bit_idx = bit_idx + 1) begin
-            if (pattern_working[bit_idx] && !spike_valid) begin
+            if (pattern_working[bit_idx] && !spike_valid_decode) begin
                 current_spike_idx = bit_idx[$clog2(SPIKES)-1:0];
-                spike_valid = 1'b1;
+                spike_valid_decode = 1'b1;
             end
         end
     end
@@ -276,8 +361,9 @@ module processor #(
             
             ST_DECODE: begin
                 if (pattern_empty) begin
-                    next_state = ST_WRITEBACK;
-                end else if (spike_valid) begin
+                    // Done with MAC, apply LIF if enabled
+                    next_state = lif_enable ? ST_LIF_UPDATE : ST_WRITEBACK;
+                end else if (spike_valid_decode) begin
                     next_state = ST_ACCUMULATE;
                 end
             end
@@ -290,6 +376,11 @@ module processor #(
             ST_CLEAR_BIT: begin
                 // After clearing bit, go back to decode for next spike
                 next_state = ST_DECODE;
+            end
+
+            ST_LIF_UPDATE: begin
+                // LIF update takes one cycle
+                next_state = ST_WRITEBACK;
             end
             
             ST_WRITEBACK: begin
@@ -311,7 +402,15 @@ module processor #(
             prefix_loaded <= 1'b0;
             pe_accumulate_en <= 1'b0;
             writeback_en <= 1'b0;
+            lif_update_en <= 1'b0;
+            lif_input_valid <= 1'b0;
+            spike_valid <= 1'b0;
         end else begin
+            // Default values
+            lif_update_en <= 1'b0;
+            lif_input_valid <= 1'b0;
+            spike_valid <= 1'b0;
+
             case (state)
                 ST_IDLE: begin
                     if (task_valid) begin
@@ -362,10 +461,21 @@ module processor #(
                         pattern_working[current_spike_idx] <= 1'b0;
                     end
                 end
+
+                ST_LIF_UPDATE: begin
+                    // Trigger LIF neuron update with accumulated synaptic input
+                    lif_update_en <= 1'b1;
+                    lif_input_valid <= 1'b1;
+                    spike_valid <= 1'b1;  // Spikes will be valid after this cycle
+                end
                 
                 ST_WRITEBACK: begin
                     writeback_en <= 1'b1;
                     pe_accumulate_en <= 1'b0;
+                    // Keep LIF signals stable for one more cycle so LIF module sees the update
+                    lif_update_en <= 1'b0;  // Clear update enable (LIF already latched)
+                    lif_input_valid <= 1'b0;
+                    spike_valid <= lif_enable;  // Keep spike_valid if LIF was used
                     
                     // Debug print for NULL prefix writeback
                     if (is_null_prefix) begin
@@ -381,6 +491,12 @@ module processor #(
                     writeback_en <= 1'b0;
                 end
             endcase
+
+            // Handle end-of-timestep leak application (independent of task FSM)
+            if (timestep_end && lif_enable) begin
+                lif_update_en <= 1'b1;
+                lif_input_valid <= 1'b0;  // No new input, just apply leak
+            end
         end
     end
     
