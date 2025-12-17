@@ -1,5 +1,8 @@
 # Prosperity PPU: Product Sparsity Accelerator for SNNs
 
+> **⚠️ Prototype / Research Implementation**  
+> This is an experimental prototype for exploring product sparsity in SNN accelerators. It is intended for research, simulation, and FPGA prototyping—not production deployment.
+
 This repository implements the **Prosperity PPU**—a hardware accelerator for spiking neural networks (SNNs) that exploits **product sparsity** to dramatically reduce computation by reusing shared spike patterns across matrix rows.
 
 ## Architecture Overview
@@ -72,9 +75,11 @@ make test-processor
 - Adjust `PE_COUNT`, `WEIGHT_WIDTH`, and `ACC_WIDTH` parameters for different processor configurations.
 - Edit the testbenches in `tb/` to create custom spike patterns or test new scenarios.
 
-## Roadmap: Completing the SNN Accelerator
+## Roadmap: Prototype → Full SNN Accelerator
 
-### Current State
+> **Goal:** Build a working FPGA prototype that can run small SNN benchmarks (e.g., MNIST on LeNet-5 SNN) end-to-end, demonstrating product sparsity benefits.
+
+### Current State (Prototype Core)
 
 | Module | Status |
 |--------|--------|
@@ -128,17 +133,19 @@ make test-processor
 
 ---
 
-### Suggested Implementation Roadmap
+### Suggested Prototype Roadmap
 
 ```
-Week 1–2: Phase 1 (Neuron + Timestep + I/O)
+Week 1–2: Phase 1 (Neuron + Timestep + I/O)  ← Minimum Viable Prototype
     └── LIF module + timestep FSM
     └── Spike encoder + collector stubs
     └── Basic end-to-end test (single tile, single layer)
+    └── Run LeNet-5 MNIST inference in simulation
 
 Week 3:   Phase 2 (Memory + Host)
     └── CSR regfile + AXI-Lite wrapper
     └── Weight memory controller
+    └── FPGA bring-up on dev board
 
 Week 4:   Phase 3 (Scaling)
     └── Multi-tile loopback test
@@ -149,6 +156,17 @@ Week 5+:  Phase 4–5 (Learning + Polish)
     └── STDP hooks (optional)
     └── Perf counters, FPGA build, docs
 ```
+
+---
+
+### Prototype Milestones
+
+| Milestone | Description | Target |
+|-----------|-------------|--------|
+| **M1: Simulation MVP** | Single-tile LeNet-5 layer runs in Verilator, matches golden output | Week 2 |
+| **M2: FPGA Bringup** | Design runs on FPGA dev board with UART/JTAG control | Week 3 |
+| **M3: Full Network** | Complete LeNet-5 MNIST inference on FPGA, measure latency/energy | Week 4 |
+| **M4: Benchmarking** | Compare vs. dense baseline, publish sparsity speedup numbers | Week 5 |
 
 ---
 
