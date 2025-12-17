@@ -29,7 +29,10 @@ module top #(
     parameter VMEM_WIDTH    = 16,     // Membrane potential width
     parameter THRESH_WIDTH  = 16,     // Threshold width
     parameter LEAK_WIDTH    = 8,      // Leak value width
-    parameter REFRAC_WIDTH  = 4       // Refractory counter width
+    parameter REFRAC_WIDTH  = 4,      // Refractory counter width
+    // Timestep parameters
+    parameter TIMESTEP_WIDTH = 16,    // Timestep counter width
+    parameter MAX_TIMESTEPS  = 256    // Maximum timesteps for buffers
 ) (
     // Clock and Reset
     input  wire clk,
@@ -92,6 +95,26 @@ module top #(
     input  wire [$clog2(ROWS)-1:0]  spike_buf_rd_addr,     // Read address for spike buffer
     output wire [PE_COUNT-1:0]      spike_buf_rd_data,     // Spike data at read address
 
+    // ─────────────────── Timestep Control Interface ─────────────────────
+    input  wire [TIMESTEP_WIDTH-1:0] cfg_num_timesteps,    // Number of timesteps to simulate
+    input  wire                      sim_start,            // Start multi-timestep simulation
+    output wire [TIMESTEP_WIDTH-1:0] sim_timestep_idx,     // Current timestep index
+    output wire                      sim_active,           // Simulation in progress
+    output wire                      sim_done,             // All timesteps complete
+
+    // ─────────────────── Spike Injection Interface ──────────────────────
+    input  wire                      spike_inject_wr_en,   // Write enable for input spikes
+    input  wire [$clog2(MAX_TIMESTEPS*ROWS)-1:0] spike_inject_wr_addr, // Input buffer address
+    input  wire [SPIKES-1:0]         spike_inject_wr_data, // Input spike pattern
+
+    // ─────────────────── Spike Collection Interface ─────────────────────
+    input  wire                      spike_collect_enable, // Enable output spike collection
+    input  wire                      spike_collect_clear,  // Clear output buffer
+    input  wire                      spike_collect_rd_en,  // Read enable for output spikes
+    input  wire [$clog2(MAX_TIMESTEPS*ROWS)-1:0] spike_collect_rd_addr, // Output buffer address
+    output wire [PE_COUNT-1:0]       spike_collect_rd_data,// Output spike data
+    output wire [$clog2(MAX_TIMESTEPS*ROWS):0] spike_collect_count, // Total spikes collected
+
     // Debug: Membrane potential readback
     input  wire [$clog2(PE_COUNT)-1:0] vmem_rd_idx,
     output wire [VMEM_WIDTH-1:0]       vmem_rd_data,
@@ -112,6 +135,26 @@ module top #(
   // Tile memory (dual-port)
   reg [SPIKES-1:0] tile_ram [0:ROWS-1];
   reg [NO_WIDTH-1:0] popcount_ram [0:ROWS-1];
+  
+  // ===================================================================
+  // Phase 1 Integration: Timestep Control and Spike I/O
+  // ===================================================================
+  
+  // Timestep controller signals
+  wire timestep_tile_start;
+  wire timestep_tile_done;
+  wire [TIMESTEP_WIDTH-1:0] timestep_idx_internal;
+  wire timestep_end_internal;
+  
+  // Spike injector signals
+  wire inject_done;
+  wire inject_tcam_set_en;
+  wire [$clog2(ROWS)-1:0] inject_tcam_set_addr;
+  wire [SPIKES-1:0] inject_tcam_set_key;
+  
+  // Spike collector signals
+  wire [PE_COUNT-1:0] collect_rd_data;
+  wire [$clog2(MAX_TIMESTEPS*ROWS):0] collect_spike_count;
   
   // Control FSM states
   localparam ST_IDLE      = 3'd0;
@@ -186,7 +229,7 @@ module top #(
     
     case (state)
       ST_IDLE: begin
-        if (tile_start && ppu_ready) begin
+        if (tile_start_internal && ppu_ready) begin
           next_state = ST_LOAD;
         end
       end
@@ -220,6 +263,10 @@ module top #(
   // Status outputs
   assign ppu_ready = (state == ST_IDLE) || (state == ST_DONE);
   assign ppu_busy = (state != ST_IDLE) && (state != ST_DONE);
+  
+  // Override tile_start with timestep controller when simulation active
+  wire tile_start_internal = sim_active ? timestep_tile_start : tile_start;
+  wire timestep_end_output = timestep_end_internal;
   
   // Debug outputs
   assign dbg_state = state;
@@ -260,14 +307,44 @@ module top #(
     .row_popcnt(det_row_pc),
     .detector_init_done(detector_init_done),
     
-    // Memory interface
-    .tile_mem_addr(tile_mem_addr),
-    .tile_mem_data_in(tile_mem_data_in),
-    .tile_mem_wr_en(tile_mem_wr_en),
+    // Memory interface - multiplex with spike injector when simulation active
+    .tile_mem_addr(sim_active && inject_tcam_set_en ? inject_tcam_set_addr : tile_mem_addr),
+    .tile_mem_data_in(sim_active && inject_tcam_set_en ? inject_tcam_set_key : tile_mem_data_in),
+    .tile_mem_wr_en((sim_active && inject_tcam_set_en) || tile_mem_wr_en),
     .popcount_mem_addr(tile_mem_wr_en ? tile_mem_addr : pc_mem_addr),
     .popcount_mem_data_in(tile_mem_wr_en ? $countones(tile_mem_data_in) : pc_mem_data_in),
     .popcount_mem_wr_en(tile_mem_wr_en | pc_mem_wr_en)
   );
+
+  // ===================================================================
+  // Timestep Controller Instance
+  // ===================================================================
+  timestep_ctrl #(
+    .TIMESTEP_WIDTH(TIMESTEP_WIDTH)
+  ) u_timestep_ctrl (
+    .clk(clk),
+    .rst_n(rst_n),
+    
+    // Configuration
+    .num_timesteps(cfg_num_timesteps),
+    
+    // Control
+    .start(sim_start),
+    .tile_done(timestep_tile_done),
+    
+    // Status outputs
+    .timestep_idx(timestep_idx_internal),
+    .tile_start(timestep_tile_start),
+    .timestep_end(timestep_end_internal),
+    .sim_active(sim_active),
+    .sim_done(sim_done)
+  );
+  
+  // Connect tile_done from dispatcher when simulation active
+  assign timestep_tile_done = sim_active ? dsp_tile_done : 1'b0;
+  
+  // Export timestep index
+  assign sim_timestep_idx = timestep_idx_internal;
 
   // ===================================================================
   // Pruner Interface
@@ -467,7 +544,7 @@ module top #(
 
     // LIF Control
     .lif_enable(cfg_lif_enable),
-    .timestep_end(timestep_end),
+    .timestep_end(sim_active ? timestep_end_internal : timestep_end),
 
     // Spike Output
     .spike_out(proc_spike_out),
@@ -484,6 +561,41 @@ module top #(
   
   // Connect processor ready signal to dispatcher
   assign core_ready = proc_ready;
+
+  // ===================================================================
+  // Spike Collector Instance
+  // ===================================================================
+  spike_collector #(
+    .ROWS(ROWS),
+    .PE_COUNT(PE_COUNT),
+    .TIMESTEP_WIDTH(TIMESTEP_WIDTH),
+    .MAX_TIMESTEPS(MAX_TIMESTEPS)
+  ) u_spike_collector (
+    .clk(clk),
+    .rst_n(rst_n),
+    
+    // Spike input interface (from processor)
+    .spike_in(proc_spike_out),
+    .spike_valid(proc_spike_valid),
+    .spike_row_id(output_wr_addr),  // Use output write address as row ID
+    .timestep_idx(timestep_idx_internal),
+    
+    // Control
+    .collect_enable(spike_collect_enable),
+    .clear_buffer(spike_collect_clear),
+    
+    // Host read interface
+    .host_rd_en(spike_collect_rd_en),
+    .host_rd_addr(spike_collect_rd_addr),
+    .host_rd_data(collect_rd_data),
+    
+    // Statistics
+    .spike_count(collect_spike_count)
+  );
+  
+  // Export spike collector outputs
+  assign spike_collect_rd_data = collect_rd_data;
+  assign spike_collect_count = collect_spike_count;
 
   // ===================================================================
   // Spike Buffer - Store spikes per row for next layer / host readback

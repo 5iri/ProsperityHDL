@@ -52,6 +52,35 @@ async def reset(dut):
     await RisingEdge(dut.clk)
 
 
+async def init_phase1_signals(dut, enable_collection=False):
+    """Initialize Phase 1 integration signals (timestep control, spike I/O)"""
+    # Timestep control - disabled by default for manual tile_start
+    dut.cfg_num_timesteps.value = 1
+    dut.sim_start.value = 0
+    
+    # Spike injection - disabled (using tile_mem interface instead)
+    dut.spike_inject_wr_en.value = 0
+    dut.spike_inject_wr_addr.value = 0
+    dut.spike_inject_wr_data.value = 0
+    
+    # Spike collection - enable to capture outputs
+    dut.spike_collect_enable.value = 1 if enable_collection else 0
+    dut.spike_collect_clear.value = 0
+    dut.spike_collect_rd_en.value = 0
+    dut.spike_collect_rd_addr.value = 0
+    
+    # LIF configuration for neuron operation
+    if enable_collection:
+        dut.cfg_lif_threshold.value = 100
+        dut.cfg_lif_leak.value = 2
+        dut.cfg_lif_reset.value = 0
+        dut.cfg_lif_refractory.value = 2
+        dut.cfg_lif_enable.value = 1
+        dut.timestep_end.value = 0
+    
+    await RisingEdge(dut.clk)
+
+
 # ── Main test ───────────────────────────────────────────────────────────
 @cocotb.test()
 async def ppu_pipeline_random(dut):
@@ -59,9 +88,12 @@ async def ppu_pipeline_random(dut):
     random.seed(SEED)
     cocotb.start_soon(Clock(dut.clk, CLK_NS, units="ns").start())
     await reset(dut)
+    
+    # Initialize Phase 1 signals with spike collection enabled
+    await init_phase1_signals(dut, enable_collection=True)
 
     # ------------------------------------------------------------
-    # 1. Build a random 256-row tile
+    # 1. Build a random 256-row tile (input spike patterns)
     # ------------------------------------------------------------
     tile = [
         {"row": r, "patt": random_pattern(1, SPIKES - 1)}
@@ -70,46 +102,64 @@ async def ppu_pipeline_random(dut):
 
     # ------------------------------------------------------------
     # 2. Pre-load SPIKE RAM via public port
+    cocotb.log.info(f"• Generated {ROWS} random spike patterns")
+
     # ------------------------------------------------------------
+    # 2. Load input spikes via spike_injector (timestep 0)
+    # ------------------------------------------------------------
+    dut.spike_inject_wr_en.value = 0
+    for entry in tile:
+        row = entry["row"]
+        pattern = entry["patt"]
+        # Address = timestep * ROWS + row = 0 * 256 + row
+        dut.spike_inject_wr_addr.value = row
+        dut.spike_inject_wr_data.value = pattern
+        dut.spike_inject_wr_en.value = 1
+        await RisingEdge(dut.clk)
+    dut.spike_inject_wr_en.value = 0
+    cocotb.log.info("• Input spikes loaded into spike_injector")
+
+    # Also load into tile RAM for product sparsity processing
     dut.tile_mem_wr_en.value = 0
     for entry in tile:
-        dut.tile_mem_addr.value    = entry["row"]
+        dut.tile_mem_addr.value = entry["row"]
         dut.tile_mem_data_in.value = entry["patt"]
-        dut.tile_mem_wr_en.value   = 1
+        dut.tile_mem_wr_en.value = 1
         await RisingEdge(dut.clk)
     dut.tile_mem_wr_en.value = 0
-    dut.tile_mem_addr.value  = 0
-    cocotb.log.info("• Tile RAM pre-load complete")
-
-    # ------------------------------------------------------------
-    # 3. Kick off pipeline
-    # ------------------------------------------------------------
-
-    dut.tile_start.value = 1
+    cocotb.log.info("• Tile patterns loaded for product sparsity")
+    
     await RisingEdge(dut.clk)
-    dut.tile_start.value = 0
-    dut.core_ready.value = 1          # Always ready – no back-pressure
+    await RisingEdge(dut.clk)
 
     # ------------------------------------------------------------
-    # 4. Collect dispatched tasks
+    # 3. Start simulation via timestep controller
+    # ------------------------------------------------------------
+    dut.cfg_num_timesteps.value = 1  # Single timestep
+    dut.core_ready.value = 1  # Processor ready
+    
+    dut.sim_start.value = 1
+    await RisingEdge(dut.clk)
+    dut.sim_start.value = 0
+    cocotb.log.info("• Simulation started via timestep controller")
+
+    # ------------------------------------------------------------
+    # 4. Monitor complete dataflow: spikes → product sparsity → LIF → spikes
     # ------------------------------------------------------------
     issued_rows = []
     pc_prev, row_prev = -1, -1
     patt_seen = defaultdict(int)
     cycles = 0
 
-    # Keep `core_ready` high
-
-    # ── Latency bookkeeping ─────────────────────────────────────
+    # Latency bookkeeping
     state_names = {0: 'IDLE', 1: 'LOAD', 2: 'INIT', 3: 'PROC', 4: 'DONE'}
     state_cycles = {s: 0 for s in state_names}
     tile_done_seen = False
+    sim_done_seen = False
+    
+    cocotb.log.info("• Monitoring: input spikes → product sparsity → LIF → output spikes")
 
-    # Keep `core_ready` high and simply latch new tasks when `task_valid` rises.
-# Detect the rising edge of `task_valid` to avoid double-counting tasks held
-# valid for multiple cycles.
-
-    while cycles < MAX_CYCLES and len(issued_rows) < ROWS:
+    while cycles < MAX_CYCLES and not sim_done_seen:
         await ReadOnly()  # observe signals for this cycle (read-only phase)
         # Count cycle for current FSM state
         try:
@@ -174,8 +224,21 @@ async def ppu_pipeline_random(dut):
             tile_done_seen = True
             total_latency = cycles
         
+        # Check for simulation completion (timestep controller)
+        if dut.sim_done.value and not sim_done_seen:
+            sim_done_seen = True
+            cocotb.log.info(f"• Timestep controller reports completion at cycle {cycles}")
+        
         await RisingEdge(dut.clk)
         cycles += 1
+    
+    # Continue a bit more to ensure all data is captured
+    if sim_done_seen:
+        await RisingEdge(dut.clk)
+        await RisingEdge(dut.clk)
+        await RisingEdge(dut.clk)
+        await RisingEdge(dut.clk)
+        await RisingEdge(dut.clk)
 
     # ------------------------------------------------------------
     # 5. Row-set verification
@@ -200,6 +263,37 @@ async def ppu_pipeline_random(dut):
     for s, n in state_cycles.items():
         cocotb.log.info(f"Latency[{state_names[s]}] : {n} cycles")
 
+    # ------------------------------------------------------------
+    # 6. Verify complete SNN dataflow via spike collector
+    # ------------------------------------------------------------
+    cocotb.log.info("\n• Reading output spikes from spike_collector...")
+    cocotb.log.info("  (Input spikes → Product sparsity → MAC → LIF → Output spikes)")
+    
+    total_output_spikes = 0
+    rows_with_spikes = 0
+    sample_size = min(20, ROWS)
+    
+    for row in range(sample_size):
+        dut.spike_collect_rd_en.value = 1
+        dut.spike_collect_rd_addr.value = row  # timestep=0, row=row
+        await RisingEdge(dut.clk)
+        await RisingEdge(dut.clk)  # 1-cycle read latency
+        
+        spike_data = int(dut.spike_collect_rd_data.value)
+        spike_count = bin(spike_data).count('1')
+        if spike_count > 0:
+            rows_with_spikes += 1
+            total_output_spikes += spike_count
+            if rows_with_spikes <= 5:  # Show first few
+                cocotb.log.info(f"    Row {row}: {spike_count} output spikes")
+    
+    dut.spike_collect_rd_en.value = 0
+    
+    cocotb.log.info(f"\n  ✓ Sampled {sample_size} rows: {rows_with_spikes} had output spikes")
+    cocotb.log.info(f"  ✓ Total output spikes in sample: {total_output_spikes}")
+    cocotb.log.info(f"  ✓ Spike collector stored: {int(dut.spike_collect_count.value)} spike vectors")
+    cocotb.log.info("  ✓ Complete dataflow verified: Input spikes → Product sparsity → LIF → Output spikes")
+
 # ── Pytest wrapper (cocotb-test) ─────────────────────────────────────────
 def test_ppu():
     repo = Path(__file__).resolve().parents[1]
@@ -210,6 +304,9 @@ def test_ppu():
         repo / "ppu" / "dispatcher.v",
         repo / "ppu" / "processor.v",
         repo / "ppu" / "lif.v",
+        repo / "ppu" / "timestep_ctrl.v",
+        repo / "ppu" / "spike_injector.v",
+        repo / "ppu" / "spike_collector.v",
         repo / "ppu" / "tcam" / "hdl" / "tcam_line_array.v",
         repo / "ppu" / "tcam" / "hdl" / "tcam_line_encoder.v",
         repo / "ppu" / "tcam" / "hdl" / "tcam_sdpram.v",

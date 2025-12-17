@@ -219,7 +219,6 @@ def test_timestep_ctrl():
         parameters={
             "TIMESTEP_WIDTH": "16",
         },
-        extra_args=["--trace-fst", "--trace-structs"],
         sim_build="sim_build",
         timescale="1ns/1ps",
     )
