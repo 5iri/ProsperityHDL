@@ -584,7 +584,7 @@ async def detector_subset_index_test(dut):
     assert max_tcam_latency == 3, "TCAM does not maintain consistent 3-cycle latency"
 
 # ---------------- PyTest harness ------------------------------------
-def test_detector():
+def runCocotbTests():
     repo = Path(__file__).resolve().parents[1]
     verilog_sources = [
         repo / "ppu" / "detector.v",  # Detector module

@@ -133,7 +133,6 @@ module timestep_ctrl #(
 
                 ST_START_TILE: begin
                     tile_start <= 1'b1;  // Pulse to start tile processing
-                    $display("[TIMESTEP_CTRL] Starting timestep %0d / %0d", timestep_idx, num_timesteps);
                 end
 
                 ST_WAIT_TILE: begin
@@ -142,7 +141,6 @@ module timestep_ctrl #(
 
                 ST_TIMESTEP_END: begin
                     timestep_end <= 1'b1;  // Pulse for LIF leak application
-                    $display("[TIMESTEP_CTRL] Timestep %0d complete", timestep_idx);
                 end
 
                 ST_NEXT: begin
@@ -154,7 +152,6 @@ module timestep_ctrl #(
                 ST_DONE: begin
                     sim_active <= 1'b0;
                     sim_done   <= 1'b1;
-                    $display("[TIMESTEP_CTRL] Simulation complete: %0d timesteps", num_timesteps);
                 end
             endcase
         end

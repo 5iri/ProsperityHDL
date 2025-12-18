@@ -23,13 +23,13 @@ module top #(
     parameter SPIKES       = 16,      // Number of spikes per pattern
     parameter NO_WIDTH     = 8,       // Width of number-of-ones counter (log2(SPIKES)+1)
     parameter PE_COUNT     = 128,     // Number of Processing Elements
-    parameter WEIGHT_WIDTH = 8,       // Weight precision
-    parameter ACC_WIDTH    = 16,      // Accumulator width
-    // LIF Neuron Parameters
-    parameter VMEM_WIDTH    = 16,     // Membrane potential width
-    parameter THRESH_WIDTH  = 16,     // Threshold width
-    parameter LEAK_WIDTH    = 8,      // Leak value width
-    parameter REFRAC_WIDTH  = 4,      // Refractory counter width
+    parameter WEIGHT_WIDTH = 16,      // Weight precision (IEEE FP16)
+    parameter ACC_WIDTH    = 16,      // Accumulator width (IEEE FP16)
+    // LIF Neuron Parameters (all FP16 except refractory)
+    parameter VMEM_WIDTH    = 16,     // Membrane potential width (FP16)
+    parameter THRESH_WIDTH  = 16,     // Threshold width (FP16)
+    parameter LEAK_WIDTH    = 16,     // Leak value width (FP16)
+    parameter REFRAC_WIDTH  = 4,      // Refractory counter width (integer cycles)
     // Timestep parameters
     parameter TIMESTEP_WIDTH = 16,    // Timestep counter width
     parameter MAX_TIMESTEPS  = 256    // Maximum timesteps for buffers
@@ -174,11 +174,18 @@ module top #(
   
   // Tile memory read/write
   always @(posedge clk) begin
+    // Host writes (configuration from software) have priority
     if (tile_mem_wr_en) begin
       tile_ram[tile_mem_addr] <= tile_mem_data_in;
       // Automatically calculate and store popcount
       popcount_ram[tile_mem_addr] <= $countones(tile_mem_data_in);
+    // Spike injector writes - mirror TCAM writes to tile_ram/popcount_ram
+    // so downstream pipeline sees the injected data
+    end else if (inject_tcam_set_en) begin
+      tile_ram[inject_tcam_set_addr] <= inject_tcam_set_key;
+      popcount_ram[inject_tcam_set_addr] <= $countones(inject_tcam_set_key);
     end
+    
     tile_mem_data_out <= tile_ram[tile_mem_addr];
     
     if (pc_mem_wr_en) begin
@@ -350,7 +357,9 @@ module top #(
   );
   
   // Connect tile_done from dispatcher when simulation active
-  assign timestep_tile_done = sim_active ? dsp_tile_done : 1'b0;
+  // Use the full tile completion (when top FSM reaches ST_DONE) for multi-timestep mode
+  // This ensures both spike injection AND processing complete before next timestep
+  assign timestep_tile_done = sim_active ? (state == ST_DONE) : 1'b0;
   
   // Export timestep index
   assign sim_timestep_idx = timestep_idx_internal;
@@ -402,8 +411,8 @@ module top #(
   pruner #(
     .N(ROWS),
     .M(SPIKES),
-    .NO_WIDTH(NO_WIDTH),
-    .NULL_ID(8'd255)  // Use 255 as NULL prefix ID for roots
+    .NO_WIDTH(NO_WIDTH)
+    // NULL prefix now encoded as prefix_id == row_id (self-reference)
   ) u_pruner (
     .clk(clk),
     .rst_n(rst_n),

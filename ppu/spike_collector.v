@@ -80,8 +80,6 @@ module spike_collector #(
             // Increment spike count if any spikes are active
             if (|spike_in) begin
                 spike_count <= spike_count + 1;
-                $display("[SPIKE_COLLECTOR] t=%0d, row=%0d: spikes=0x%032x", 
-                         timestep_idx, spike_row_id, spike_in);
             end
         end
     end

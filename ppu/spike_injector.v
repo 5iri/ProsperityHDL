@@ -77,9 +77,12 @@ module spike_injector #(
     // Row counter for loading
     reg [$clog2(ROWS)-1:0] row_cnt;
 
-    // Base address for current timestep
+    // Latched timestep index - captured on tile_start to avoid race conditions
+    reg [TIMESTEP_WIDTH-1:0] latched_timestep_idx;
+
+    // Base address for current timestep (use latched value)
     wire [$clog2(MAX_TIMESTEPS*ROWS)-1:0] base_addr;
-    assign base_addr = timestep_idx * ROWS;
+    assign base_addr = latched_timestep_idx * ROWS;
 
     // =========================================================================
     // FSM State Transitions
@@ -125,6 +128,7 @@ module spike_injector #(
             tcam_set_addr<= {$clog2(ROWS){1'b0}};
             tcam_set_key <= {SPIKES{1'b0}};
             inject_done  <= 1'b0;
+            latched_timestep_idx <= {TIMESTEP_WIDTH{1'b0}};
         end else begin
             // Default values
             tcam_set_en <= 1'b0;
@@ -134,7 +138,8 @@ module spike_injector #(
                 ST_IDLE: begin
                     if (tile_start) begin
                         row_cnt <= {$clog2(ROWS){1'b0}};
-                        $display("[SPIKE_INJECTOR] Starting injection for timestep %0d", timestep_idx);
+                        // Latch timestep_idx to avoid race conditions during loading
+                        latched_timestep_idx <= timestep_idx;
                     end
                 end
 
@@ -144,9 +149,6 @@ module spike_injector #(
                     tcam_set_addr <= row_cnt;
                     tcam_set_key  <= input_buffer[base_addr + row_cnt];
 
-                    $display("[SPIKE_INJECTOR] Loading row %0d: pattern=0x%04x", 
-                             row_cnt, input_buffer[base_addr + row_cnt]);
-
                     // Increment row counter
                     if (row_cnt < ROWS - 1) begin
                         row_cnt <= row_cnt + 1;
@@ -155,7 +157,6 @@ module spike_injector #(
 
                 ST_DONE: begin
                     inject_done <= 1'b1;
-                    $display("[SPIKE_INJECTOR] Injection complete for timestep %0d", timestep_idx);
                 end
             endcase
         end

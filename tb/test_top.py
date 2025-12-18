@@ -97,6 +97,42 @@ def pattern_stats(patterns, spikes=16) -> str:
     return "\n".join(lines)
 
 
+async def verify_injected_tile_updates(dut, expected_patterns, rows_to_check):
+    """
+    Ensure ST_INJECT updates tile/popcount memories with spike injector data.
+    Follows the FSM transitions defined in the paper (ST_INJECT → ST_INIT).
+    """
+    ST_INJECT = 5
+    ST_INIT = 2
+    inject_idx = 0
+    prev_state = int(dut.dbg_state.value)
+    cycles = 0
+    max_cycles = 200_000
+
+    while inject_idx < len(expected_patterns):
+        await RisingEdge(dut.clk)
+        cycles += 1
+        if cycles > max_cycles:
+            raise AssertionError("Timed out waiting for spike injector updates")
+
+        curr_state = int(dut.dbg_state.value)
+        if prev_state == ST_INJECT and curr_state == ST_INIT:
+            # Injection for timestep inject_idx just completed
+            for row in range(rows_to_check):
+                actual_pattern = int(dut.tile_ram[row].value)
+                expected_pattern = expected_patterns[inject_idx][row]
+                assert actual_pattern == expected_pattern, (
+                    f"Timestep {inject_idx} row {row} mismatch: "
+                    f"tile_ram=0x{actual_pattern:04X}, expected 0x{expected_pattern:04X}"
+                )
+                actual_pc = int(dut.popcount_ram[row].value)
+                expected_pc = bin(expected_pattern).count("1")
+                assert actual_pc == expected_pc, (
+                    f"Timestep {inject_idx} row {row} popcount mismatch: "
+                    f"{actual_pc} vs expected {expected_pc}"
+                )
+            inject_idx += 1
+        prev_state = curr_state
 async def reset(dut):
     dut.rst_n.value = 0
     for _ in range(5):
@@ -348,9 +384,11 @@ async def ppu_pipeline_random(dut):
             task_patt = dut.task_pattern.value.integer
             row_patt  = tile[row]["patt"]
             
-            # Handle NULL prefix (0xFF = 255) - indicates root row with no reusable prefix
-            NULL_PREFIX_ID = 0xFF
-            is_null_prefix = (prefix_id == NULL_PREFIX_ID)
+            # Handle NULL prefix: prefix_id == row_id means root row (no reusable prefix)
+            # This encoding is semantically correct since a row can never be its own prefix:
+            # - PM requires proper subset (A ⊂ Si, A ≠ Si)
+            # - EM requires different rows with exact match (i < j, Si = Sj)
+            is_null_prefix = (prefix_id == row)
             
             if is_null_prefix:
                 prefix_patt = 0  # NULL prefix has no pattern contribution
@@ -460,6 +498,7 @@ async def ppu_pipeline_random(dut):
 async def ppu_multi_timestep(dut):
     """Test multi-timestep SNN simulation with temporal accumulation."""
     random.seed(SEED + 1)
+    np.random.seed(SEED + 1)  # Seed numpy RNG too for reproducibility
     NUM_TIMESTEPS = 4
     ACTIVE_ROWS = 16  # Test subset for clarity
     
@@ -480,6 +519,7 @@ async def ppu_multi_timestep(dut):
     # Load input spikes for all timesteps into spike_injector
     # Use temporal correlation: patterns evolve over time
     cocotb.log.info(f"• Loading temporal input spikes for {NUM_TIMESTEPS} timesteps...")
+    temporal_patterns = [[0 for _ in range(ACTIVE_ROWS)] for _ in range(NUM_TIMESTEPS)]
     for t in range(NUM_TIMESTEPS):
         for row in range(ACTIVE_ROWS):
             # Use workload patterns with temporal variation
@@ -498,6 +538,7 @@ async def ppu_multi_timestep(dut):
             await RisingEdge(dut.clk)
             if row < 3 and t < 2:  # Log samples
                 cocotb.log.info(f"    t={t}, row={row}: spikes={bin(pattern).count('1')}")
+            temporal_patterns[t][row] = pattern
     dut.spike_inject_wr_en.value = 0
     cocotb.log.info("  ✓ Temporal input spikes loaded")
     
@@ -524,6 +565,11 @@ async def ppu_multi_timestep(dut):
     await RisingEdge(dut.clk)
     dut.sim_start.value = 0
     await RisingEdge(dut.clk)  # Allow controller to process start pulse
+
+    # Monitor each ST_INJECT→ST_INIT boundary to ensure injected spikes update tile/popcount RAM.
+    injection_monitor = cocotb.start_soon(
+        verify_injected_tile_updates(dut, temporal_patterns, ACTIVE_ROWS)
+    )
     
     # Monitor timestep progression
     prev_timestep = -1
@@ -587,8 +633,10 @@ async def ppu_multi_timestep(dut):
     cocotb.log.info("  ✓ Multi-timestep SNN simulation verified!")
     cocotb.log.info("  ✓ Neurons accumulated potential over time")
 
+    await injection_monitor
+
 # ── Pytest wrapper (cocotb-test) ─────────────────────────────────────────
-def test_ppu():
+def runCocotbTests():
     repo = Path(__file__).resolve().parents[1]
     verilog_sources = [
         repo / "ppu" / "top.v",

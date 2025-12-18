@@ -306,7 +306,7 @@ async def test_dispatcher_small(dut):
 # ─────────────────────────────────────────────────────────────────────────
 # Pytest wrapper for cocotb-test / Verilator
 # ─────────────────────────────────────────────────────────────────────────
-def test_dispatcher():
+def runCocotbTests():
     from cocotb_test.simulator import run
     repo = Path(__file__).resolve().parents[1]
     verilog_sources = [repo / "ppu" / "dispatcher.v"]

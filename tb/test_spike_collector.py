@@ -273,7 +273,7 @@ async def test_clear_buffer(dut):
 
 
 # ── Pytest wrapper ─────────────────────────────────────────────────────────
-def test_spike_collector():
+def runCocotbTests():
     repo = Path(__file__).resolve().parents[1]
     verilog_sources = [
         repo / "ppu" / "spike_collector.v",

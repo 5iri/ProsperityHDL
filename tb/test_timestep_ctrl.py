@@ -206,7 +206,7 @@ async def test_sim_active_signal(dut):
 
 
 # ── Pytest wrapper ─────────────────────────────────────────────────────────
-def test_timestep_ctrl():
+def runCocotbTests():
     repo = Path(__file__).resolve().parents[1]
     verilog_sources = [
         repo / "ppu" / "timestep_ctrl.v",

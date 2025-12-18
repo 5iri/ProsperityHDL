@@ -10,8 +10,11 @@
 module pruner #(
     parameter N        = 256,
     parameter M        = 16,
-    parameter NO_WIDTH = 8,
-    parameter NULL_ID  = 8'd255  // NULL prefix ID for roots
+    parameter NO_WIDTH = 8
+    // NULL prefix encoding: prefix_id == row_id means "root row" (no valid prefix)
+    // This is semantically correct since a row can never be its own prefix:
+    // - PM requires proper subset (A ≠ Si)
+    // - EM requires different rows (i < j)
 ) (
     input wire clk,
     input wire rst_n,
@@ -254,8 +257,6 @@ module pruner #(
     // ---------------- Pipelined implementation ----------------
 
     // Always ready – accept a new row every cycle
-    assign pruner_ready = 1'b1;
-
     // --- Pipeline registers ---
     reg [N-1:0]           st0_si_vec;
     reg [$clog2(N)-1:0]   st0_row_idx,  st1_row_idx,  st2_row_idx;
@@ -265,11 +266,18 @@ module pruner #(
     reg [$clog2(N)-1:0]   st1_prefix_idx, st2_prefix_idx;
     reg                   st0_valid, st1_valid, st2_valid;
 
-    // Stage-0 : latch detector result
+    // Backpressure signal - stall when Stage-2 blocked
+    wire pipeline_stall = st2_valid && !dispatch_ready;
+    
+    // Signal upstream that we can accept new data
+    assign pruner_ready = !pipeline_stall;
+
+    // Stage-0 : latch detector result (stall when pipeline blocked)
     always @(posedge clk) begin
         if (!rst_n) begin
             st0_valid <= 1'b0;
-        end else begin
+        end else if (!pipeline_stall) begin
+            // Only advance when not stalled
             st0_valid <= si_valid;
             if (si_valid) begin
                 st0_si_vec     <= si_vector;
@@ -278,6 +286,7 @@ module pruner #(
                 st0_row_spikes <= spike_matrix[row_index];
             end
         end
+        // When stalled, hold current values
     end
 
     // Candidate evaluation – combinational
@@ -288,8 +297,8 @@ module pruner #(
     reg                 has_prefix_comb;
 
     always @(*) begin
-        // Initialize: no prefix found  
-        best_idx_comb    = NULL_ID;      // Use NULL_ID when no prefix found
+        // Initialize: no prefix found - use row_id as NULL marker
+        best_idx_comb    = st0_row_idx;   // Self-reference = no prefix (root)
         best_no_comb     = 0;            
         best_spikes_comb = {M{1'b0}};    // Zero pattern for NULL prefix
         has_prefix_comb  = 1'b0;
@@ -319,13 +328,14 @@ module pruner #(
         
     end
 
-    // Stage-1 : register selection results
+    // Stage-1 : register selection results (stall when downstream blocked)
     reg st1_has_prefix;
     always @(posedge clk) begin
         if (!rst_n) begin
             st1_valid <= 1'b0;
             st1_has_prefix <= 1'b0;
-        end else begin
+        end else if (!pipeline_stall) begin
+            // Only advance when not stalled
             st1_valid        <= st0_valid;
             st1_row_idx      <= st0_row_idx;
             st1_row_spikes   <= st0_row_spikes;
@@ -333,6 +343,7 @@ module pruner #(
             st1_pre_spikes   <= best_spikes_comb;
             st1_has_prefix   <= has_prefix_comb;
         end
+        // When stalled, hold current values
     end
 
     // Stage-2 : XOR and handshake to dispatcher
@@ -341,33 +352,46 @@ module pruner #(
         if (!rst_n) begin
             st2_valid <= 1'b0;
             st2_has_prefix <= 1'b0;
-            prune_valid <= 1'b0;
             row_id_out  <= 0;
             prefix_id   <= 0;
             pattern     <= 0;
+            prune_valid <= 1'b0;
         end else begin
-            st2_valid <= st1_valid;
-            st2_has_prefix <= st1_has_prefix;
-            if (st1_valid) begin
-                st2_row_idx    <= st1_row_idx;
-                st2_prefix_idx <= st1_prefix_idx;
-                // Root vs prefix XOR handling
-                if (st1_has_prefix) begin
-                    st2_pattern <= st1_row_spikes ^ st1_pre_spikes;  // Normal case
-                end else begin
-                    st2_pattern <= st1_row_spikes;  // Root: residual = row_pattern
+            // Handshake complete - clear valid or accept new data
+            if (st2_valid && dispatch_ready) begin
+                // Handshake done, accept next from Stage-1
+                st2_valid      <= st1_valid;
+                st2_has_prefix <= st1_has_prefix;
+                if (st1_valid) begin
+                    st2_row_idx    <= st1_row_idx;
+                    st2_prefix_idx <= st1_prefix_idx;
+                    if (st1_has_prefix) begin
+                        st2_pattern <= st1_row_spikes ^ st1_pre_spikes;
+                    end else begin
+                        st2_pattern <= st1_row_spikes;
+                    end
+                end
+            end else if (!st2_valid) begin
+                // Empty, accept from Stage-1
+                st2_valid      <= st1_valid;
+                st2_has_prefix <= st1_has_prefix;
+                if (st1_valid) begin
+                    st2_row_idx    <= st1_row_idx;
+                    st2_prefix_idx <= st1_prefix_idx;
+                    if (st1_has_prefix) begin
+                        st2_pattern <= st1_row_spikes ^ st1_pre_spikes;
+                    end else begin
+                        st2_pattern <= st1_row_spikes;
+                    end
                 end
             end
-
-            // Drive outputs when dispatcher ready
-            if (st2_valid && dispatch_ready) begin
-                row_id_out  <= st2_row_idx;
-                prefix_id   <= st2_prefix_idx;
-                pattern     <= st2_pattern;
-                prune_valid <= 1'b1;
-            end else begin
-                prune_valid <= 1'b0;
-            end
+            // When st2_valid && !dispatch_ready: hold current values (stalled)
+            
+            // Output directly from stage-2 registers
+            row_id_out  <= st2_row_idx;
+            prefix_id   <= st2_prefix_idx;
+            pattern     <= st2_pattern;
+            prune_valid <= st2_valid;  // Valid whenever we have data
         end
     end
 

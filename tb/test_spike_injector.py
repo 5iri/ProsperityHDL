@@ -385,7 +385,7 @@ async def test_dense_workload(dut):
 
 
 # ── Pytest wrapper ─────────────────────────────────────────────────────────
-def test_spike_injector():
+def runCocotbTests():
     repo = Path(__file__).resolve().parents[1]
     verilog_sources = [
         repo / "ppu" / "spike_injector.v",

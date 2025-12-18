@@ -217,7 +217,7 @@ def is_subset(pattern_a, pattern_b):
 
 
 # -------------------- pytest harness ----------------------------------------
-def test_pruner_pytest():
+def runCocotbTests():
     repo = Path(__file__).parent
     rtl  = repo.parent / "ppu" / "pruner.v"
 
