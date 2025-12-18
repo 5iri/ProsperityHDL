@@ -124,7 +124,7 @@ module timestep_ctrl #(
             case (state)
                 ST_IDLE: begin
                     sim_done   <= 1'b0;
-                    sim_active <= 1'b0;
+                    // Only reset sim_active on new start, not when cycling back between timesteps
                     if (start && num_timesteps > 0) begin
                         timestep_idx <= {TIMESTEP_WIDTH{1'b0}};
                         sim_active   <= 1'b1;

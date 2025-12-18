@@ -162,6 +162,7 @@ module top #(
   localparam ST_INIT      = 3'd2;
   localparam ST_PROCESS   = 3'd3;
   localparam ST_DONE      = 3'd4;
+  localparam ST_INJECT    = 3'd5;  // Wait for spike injection to complete
   
   reg [2:0] state, next_state;
   reg [$clog2(ROWS)-1:0] row_counter;
@@ -230,7 +231,15 @@ module top #(
     case (state)
       ST_IDLE: begin
         if (tile_start_internal && ppu_ready) begin
-          next_state = ST_LOAD;
+          // When sim_active, spike_injector loads TCAM, wait for inject_done
+          next_state = sim_active ? ST_INJECT : ST_LOAD;
+        end
+      end
+      
+      ST_INJECT: begin
+        // Wait for spike injector to finish loading TCAM
+        if (inject_done) begin
+          next_state = ST_INIT;
         end
       end
       
@@ -307,10 +316,10 @@ module top #(
     .row_popcnt(det_row_pc),
     .detector_init_done(detector_init_done),
     
-    // Memory interface - multiplex with spike injector when simulation active
-    .tile_mem_addr(sim_active && inject_tcam_set_en ? inject_tcam_set_addr : tile_mem_addr),
-    .tile_mem_data_in(sim_active && inject_tcam_set_en ? inject_tcam_set_key : tile_mem_data_in),
-    .tile_mem_wr_en((sim_active && inject_tcam_set_en) || tile_mem_wr_en),
+    // Memory interface - multiplex with spike injector only during INJECT state
+    .tile_mem_addr((state == ST_INJECT && inject_tcam_set_en) ? inject_tcam_set_addr : tile_mem_addr),
+    .tile_mem_data_in((state == ST_INJECT && inject_tcam_set_en) ? inject_tcam_set_key : tile_mem_data_in),
+    .tile_mem_wr_en((state == ST_INJECT && inject_tcam_set_en) || tile_mem_wr_en),
     .popcount_mem_addr(tile_mem_wr_en ? tile_mem_addr : pc_mem_addr),
     .popcount_mem_data_in(tile_mem_wr_en ? $countones(tile_mem_data_in) : pc_mem_data_in),
     .popcount_mem_wr_en(tile_mem_wr_en | pc_mem_wr_en)
@@ -345,6 +354,34 @@ module top #(
   
   // Export timestep index
   assign sim_timestep_idx = timestep_idx_internal;
+
+  // ===================================================================
+  // Spike Injector Instance
+  // ===================================================================
+  spike_injector #(
+    .ROWS(ROWS),
+    .SPIKES(SPIKES),
+    .TIMESTEP_WIDTH(TIMESTEP_WIDTH),
+    .MAX_TIMESTEPS(MAX_TIMESTEPS)
+  ) u_spike_injector (
+    .clk(clk),
+    .rst_n(rst_n),
+    
+    // Control interface
+    .tile_start(timestep_tile_start),
+    .timestep_idx(timestep_idx_internal),
+    .inject_done(inject_done),
+    
+    // Host configuration interface
+    .host_wr_en(spike_inject_wr_en),
+    .host_wr_addr(spike_inject_wr_addr),
+    .host_wr_data(spike_inject_wr_data),
+    
+    // TCAM interface (output to detector)
+    .tcam_set_en(inject_tcam_set_en),
+    .tcam_set_addr(inject_tcam_set_addr),
+    .tcam_set_key(inject_tcam_set_key)
+  );
 
   // ===================================================================
   // Pruner Interface
