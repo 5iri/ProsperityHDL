@@ -13,7 +13,7 @@ This repository implements the **Prosperity PPU**—a hardware accelerator for s
   - **TCAM-based Detector:** Fast, parallel detection of prefix relationships.
   - **Pruner:** Selects the best prefix for each row and computes the suffix mask.
   - **Dispatcher:** Sorts and issues rows in dependency-safe order (prefix before suffix).
-  - **128-PE Processor:** Parallel computation array with 8-bit weights and 16-bit accumulators.
+  - **128-PE Processor:** Parallel computation array using IEEE‑754 FP16 weights and FP16 accumulators (full FP16 datapath).
   - **Single-port RAM Interface:** For loading spike tiles from the host.
 
 ## File Structure
@@ -86,8 +86,27 @@ make test-processor
 | **Detector** (TCAM subset lookup) | ✅ Implemented |
 | **Pruner** (prefix/redundancy elimination) | ✅ Implemented |
 | **Dispatcher** (task distribution) | ✅ Implemented |
-| **Processor** (128-PE MAC array) | ✅ Implemented |
-| **Top integration** (FSM, tile RAM) | ✅ Implemented |
+| **Processor** (128-PE MAC array, FP16 datapath) | ✅ Implemented |
+| **Top integration** (FSM, tile RAM, spike injection & timestep control) | ✅ Implemented |
+
+---
+
+### Recent updates (2025-12-18)
+
+This repository was updated and validated on 2025-12-18 (see tests). Key fixes and improvements include:
+
+- Migrated the processor and LIF datapath to full IEEE‑754 FP16 (weights, accumulators, and leak values).
+- Fixed multiple timing and pipeline bugs in weight loading so that all weight words (including first and final) are stored correctly.
+- Corrected MAC / LIF handshakes (spike_valid timing, mac_accumulate gating) to avoid stale reads and double accumulation.
+- Properly handle FP16 subnormals in add/sub helpers (both inputs and results preserved instead of being implicitly normalized or flushed to zero).
+- Exposed 16-bit FP16 leak configuration at top-level (cfg_lif_leak) so software can program true FP16 leak values.
+- Implemented and validated spike injector mirroring to top-level tile RAM/popcount so multi‑timestep simulation works correctly.
+- Fixed timestep controller and injector race conditions by latching timestep indices and coordinating tile_done/inject_done so timesteps advance reliably.
+
+All cocotb tests pass locally after these fixes (10/10).
+
+---
+
 
 ---
 
