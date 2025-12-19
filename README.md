@@ -56,19 +56,25 @@ pytest tb/test_top.py
 Use the provided testing scripts:
 
 ```sh
-# Run all tests
-./run_tests.sh
+# Run tests with pytest (cocotb)
 
-# Test specific components
-./quick_test.sh detector
-./quick_test.sh processor_updated
-./quick_test.sh full_system
+# Run full test suite
+pytest -q
 
-# Using Makefile
-make test
-make test-component COMPONENT=detector
-make test-processor
+# Run all cocotb tests (tb folder)
+pytest tb/ -v
+
+# Run a single test module
+pytest tb/test_top.py -v
+
+# Run a single test function
+pytest tb/test_processor.py::runCocotbTests -v
 ```
+
+Notes:
+- This repository no longer includes helper shell scripts; use pytest directly to run cocotb tests.
+- Recommended: run inside a Python virtual environment and install requirements from requirements.txt.
+- To view simulator/cocotb output, run pytest with -s to disable capture (e.g., pytest -s tb/test_top.py).
 
 ## Customization
 - Change `ROWS`, `SPIKES`, and `NO_WIDTH` parameters in the testbenches or top module for different tile sizes.
