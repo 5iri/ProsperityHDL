@@ -666,7 +666,7 @@ def runCocotbTests():
         timescale="1ns/1ps",
         simulator="verilator",
         compile_args=["-Wall", "-Wno-fatal"],
-        waves=True,
+        waves=False,
     )
 
 

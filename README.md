@@ -126,15 +126,15 @@ All core neuron/timestep I/O plumbing is merged and exercised by cocotb:
 - **Output spike collector** — `ppu/spike_collector.v` captures per-timestep spikes for host readback; validation lives in `tb/test_spike_collector.py` and `tb/test_top.py`.
 - **End-to-end verification** — `tb/test_top.py` observes detector → pruner → dispatcher → processor → LIF → collector while the timestep controller and leak pulses govern multi-timestep execution.
 
+### Phase 2 Deliverables (✅ Completed 2026-01-01)
+
+All memory and host interface components are merged and tested:
+
+- **CSR Register File** — `ppu/csr.v` provides memory-mapped registers for PPU control, LIF configuration, timestep settings, status readback, interrupt handling, and performance counters. Verified by `tb/test_csr.py`.
+- **Weight Memory Controller** — `ppu/weight_mem_ctrl.v` implements burst-read interface to external memory with FP16 unpacking (2 weights per 32-bit word). Verified by `tb/test_weight_mem_ctrl.py`.
+- **AXI4-Lite Bridge** — `ppu/axi_lite_bridge.v` provides standard AXI4-Lite slave interface for host communication, including CSR access, spike buffer I/O, and weight control. Verified by `tb/test_axi_lite_bridge.py`.
+
 ### Upcoming Components (Prioritized)
-
-#### Phase 2 — Memory & Host Interface
-
-| # | Component | Description | Effort |
-|---|-----------|-------------|--------|
-| 5 | **Weight Memory Controller** | Burst-read interface to on-chip SRAM or external DRAM | Medium |
-| 6 | **DMA / AXI-Lite Bridge** | Host ↔ PPU data transfer for tiles, weights, spikes | Medium |
-| 7 | **CSR Register File** | Control/status registers for configuration, start/done, debug | Low |
 
 #### Phase 3 — Scalability
 
@@ -168,10 +168,10 @@ Week 1–2: Phase 1 (Neuron + Timestep + I/O)  ← ✅ Completed 2025-12-18
     └── End-to-end cocotb coverage (`tb/test_top.py`, `tb/test_processor.py`)
     └── Workloads + encoders (`tb/workloads/create_snn_workload.py`)
 
-Week 3:   Phase 2 (Memory + Host)
-    └── CSR regfile + AXI-Lite wrapper
-    └── Weight memory controller
-    └── FPGA bring-up on dev board
+Week 3:   Phase 2 (Memory + Host)  ← ✅ Completed 2026-01-01
+    └── CSR regfile (ppu/csr.v) + AXI-Lite wrapper (ppu/axi_lite_bridge.v)
+    └── Weight memory controller (ppu/weight_mem_ctrl.v)
+    └── cocotb tests for all Phase 2 modules
 
 Week 4:   Phase 3 (Scaling)
     └── Multi-tile loopback test

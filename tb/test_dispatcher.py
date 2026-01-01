@@ -327,7 +327,7 @@ def runCocotbTests():
             "-Wno-UNOPTFLAT", "-Wno-UNSIGNED",
             "-DSIMULATION",
         ],
-        waves=True,
+        waves=False,
     )
 
 
