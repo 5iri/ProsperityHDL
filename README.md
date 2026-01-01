@@ -116,16 +116,17 @@ All cocotb tests pass locally after these fixes (10/10).
 
 ---
 
-### Missing Components (Prioritized)
+### Phase 1 Deliverables (✅ Completed 2025-12-18)
 
-#### Phase 1 — Core SNN Functionality
+All core neuron/timestep I/O plumbing is merged and exercised by cocotb:
 
-| # | Component | Description | Effort |
-|---|-----------|-------------|--------|
-| 1 | **LIF Neuron Engine** | Per-timestep membrane potential update, threshold, reset, refractory | Medium |
-| 2 | **Timestep Controller** | Global timebase; advances simulation across all neurons; sync barrier | Low |
-| 3 | **Spike Encoder (Input)** | Rate/Poisson encoding for input data (images, etc.) | Low |
-| 4 | **Output Spike Collector** | Collect output spikes per timestep into host-readable buffer | Low |
+- **LIF neuron engine** — `ppu/lif.v` integrates FP16 LIF dynamics inside `ppu/processor.v`, verified by `tb/test_lif.py` and the LIF suites in `tb/test_processor.py`.
+- **Global timestep controller** — `ppu/timestep_ctrl.v` drives multi-timestep sequencing, with coverage in `tb/test_timestep_ctrl.py` and tight integration inside `top.v`.
+- **Spike encoder / injector** — Research workloads from `tb/workloads/create_snn_workload.py` feed the hardware injector `ppu/spike_injector.v`, covered by `tb/test_spike_injector.py` and the full pipeline test `tb/test_top.py`.
+- **Output spike collector** — `ppu/spike_collector.v` captures per-timestep spikes for host readback; validation lives in `tb/test_spike_collector.py` and `tb/test_top.py`.
+- **End-to-end verification** — `tb/test_top.py` observes detector → pruner → dispatcher → processor → LIF → collector while the timestep controller and leak pulses govern multi-timestep execution.
+
+### Upcoming Components (Prioritized)
 
 #### Phase 2 — Memory & Host Interface
 
@@ -161,11 +162,11 @@ All cocotb tests pass locally after these fixes (10/10).
 ### Suggested Prototype Roadmap
 
 ```
-Week 1–2: Phase 1 (Neuron + Timestep + I/O)  ← Minimum Viable Prototype
-    └── LIF module + timestep FSM
-    └── Spike encoder + collector stubs
-    └── Basic end-to-end test (single tile, single layer)
-    └── Run LeNet-5 MNIST inference in simulation
+Week 1–2: Phase 1 (Neuron + Timestep + I/O)  ← ✅ Completed 2025-12-18
+    └── LIF module + timestep FSM (ppu/lif.v, ppu/timestep_ctrl.v)
+    └── Spike injector + collector (ppu/spike_{injector,collector}.v)
+    └── End-to-end cocotb coverage (`tb/test_top.py`, `tb/test_processor.py`)
+    └── Workloads + encoders (`tb/workloads/create_snn_workload.py`)
 
 Week 3:   Phase 2 (Memory + Host)
     └── CSR regfile + AXI-Lite wrapper
@@ -197,11 +198,11 @@ Week 5+:  Phase 4–5 (Learning + Polish)
 
 ### Next Concrete Actions
 
-1. **Create `ppu/lif.v`** — leaky-integrate-and-fire neuron with threshold & reset.
-2. **Create `ppu/timestep_ctrl.v`** — global timestep counter, start/done handshake.
-3. **Extend `top.v`** — integrate LIF outputs after Processor writeback; feed spikes back into next timestep.
-4. **Add `tb/test_lif.py`** — unit test for neuron dynamics.
-5. **Add `tools/mapper.py`** — stub Python script to convert `.npz` tile exports to memory images.
+1. **Create `ppu/weight_mem_ctrl.v`** — burst-friendly SRAM/AXI weight fetcher with FP16 packing and outstanding read scheduling.
+2. **Add `ppu/axi_lite_bridge.v` + CSR file** — expose all config knobs (sim start, LIF params, spike buffers) plus status (core_ready, sim_done, counters) to software.
+3. **Extend `top.v` host pathway** — integrate the new controller/CSR block so tiles, weights, and spikes load/run without direct RAM pokes.
+4. **Add `tb/test_weight_path.py`** — cocotb test that drives CSR writes, DMA weight streaming, and multi-timestep replay against the new interfaces.
+5. **Add `tools/mapper.py`** — convert `.npz` / numpy exports into memory images consumable by the DMA/CSR workflow and automated regression tests.
 
 ---
 
