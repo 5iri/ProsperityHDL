@@ -68,7 +68,7 @@ module axi_lite_bridge #(
     input  wire                         s_axi_rready,
 
     // ─────────────────── CSR Interface ──────────────────────────────────
-    output reg  [5:0]                   csr_addr,
+    output wire [5:0]                   csr_addr,
     output reg  [31:0]                  csr_wdata,
     output reg                          csr_wr_en,
     output reg                          csr_rd_en,
@@ -126,25 +126,40 @@ module axi_lite_bridge #(
     reg [2:0] state, next_state;
 
     // =========================================================================
-    // Internal Registers
+    // Internal Registers - Separate per channel to avoid multi-driver issues
     // =========================================================================
-    reg [AXI_ADDR_WIDTH-1:0] addr_latch;
+    // Write channel registers
+    reg [AXI_ADDR_WIDTH-1:0] wr_addr_latch;
     reg [AXI_DATA_WIDTH-1:0] wdata_latch;
     reg [AXI_DATA_WIDTH/8-1:0] wstrb_latch;
+    reg [5:0] csr_wr_addr;  // CSR address for write channel
+    
+    // Read channel registers
+    reg [AXI_ADDR_WIDTH-1:0] rd_addr_latch;
     reg rd_pending;
     reg [1:0] rd_wait_cnt;  // Wait cycles for read data
+    reg [5:0] csr_rd_addr;  // CSR address for read channel
 
-    // Address decode signals
-    wire addr_is_csr;
-    wire addr_is_weight_ctrl;
-    wire addr_is_inject;
-    wire addr_is_collect;
+    // CSR address mux - select based on which operation is active
+    assign csr_addr = csr_wr_en ? csr_wr_addr : csr_rd_addr;
 
-    // CSR base is 0, so just check upper bound
-    assign addr_is_csr = (addr_latch <= ADDR_CSR_END);
-    assign addr_is_weight_ctrl = (addr_latch >= ADDR_WEIGHT_CTRL) && (addr_latch <= ADDR_WEIGHT_STATUS);
-    assign addr_is_inject = (addr_latch >= ADDR_INJECT_BASE) && (addr_latch <= ADDR_INJECT_END);
-    assign addr_is_collect = (addr_latch >= ADDR_COLLECT_BASE) && (addr_latch <= ADDR_COLLECT_END);
+    // Address decode signals - write channel
+    wire wr_addr_is_csr;
+    wire wr_addr_is_weight_ctrl;
+    wire wr_addr_is_inject;
+
+    assign wr_addr_is_csr = (wr_addr_latch <= ADDR_CSR_END);
+    assign wr_addr_is_weight_ctrl = (wr_addr_latch >= ADDR_WEIGHT_CTRL) && (wr_addr_latch <= ADDR_WEIGHT_STATUS);
+    assign wr_addr_is_inject = (wr_addr_latch >= ADDR_INJECT_BASE) && (wr_addr_latch <= ADDR_INJECT_END);
+
+    // Address decode signals - read channel
+    wire rd_addr_is_csr;
+    wire rd_addr_is_weight_ctrl;
+    wire rd_addr_is_collect;
+
+    assign rd_addr_is_csr = (rd_addr_latch <= ADDR_CSR_END);
+    assign rd_addr_is_weight_ctrl = (rd_addr_latch >= ADDR_WEIGHT_CTRL) && (rd_addr_latch <= ADDR_WEIGHT_STATUS);
+    assign rd_addr_is_collect = (rd_addr_latch >= ADDR_COLLECT_BASE) && (rd_addr_latch <= ADDR_COLLECT_END);
 
     // =========================================================================
     // FSM State Transitions
@@ -206,12 +221,12 @@ module axi_lite_bridge #(
             s_axi_wready <= 1'b0;
             s_axi_bvalid <= 1'b0;
             s_axi_bresp <= RESP_OKAY;
-            addr_latch <= {AXI_ADDR_WIDTH{1'b0}};
+            wr_addr_latch <= {AXI_ADDR_WIDTH{1'b0}};
             wdata_latch <= {AXI_DATA_WIDTH{1'b0}};
             wstrb_latch <= {(AXI_DATA_WIDTH/8){1'b0}};
             
             csr_wr_en <= 1'b0;
-            csr_addr <= 6'd0;
+            csr_wr_addr <= 6'd0;
             csr_wdata <= 32'd0;
             spike_inject_wr_en <= 1'b0;
             spike_inject_wr_addr <= 0;
@@ -233,7 +248,7 @@ module axi_lite_bridge #(
 
                 ST_WR_ADDR: begin
                     s_axi_awready <= 1'b1;
-                    addr_latch <= s_axi_awaddr;
+                    wr_addr_latch <= s_axi_awaddr;
                 end
 
                 ST_WR_DATA: begin
@@ -243,13 +258,13 @@ module axi_lite_bridge #(
                         wstrb_latch <= s_axi_wstrb;
                         
                         // Perform the write based on address
-                        if (addr_is_csr) begin
-                            csr_addr <= addr_latch[5:0];
+                        if (wr_addr_is_csr) begin
+                            csr_wr_addr <= wr_addr_latch[5:0];
                             csr_wdata <= s_axi_wdata;
                             csr_wr_en <= 1'b1;
                             s_axi_bresp <= RESP_OKAY;
-                        end else if (addr_is_weight_ctrl) begin
-                            case (addr_latch[3:0])
+                        end else if (wr_addr_is_weight_ctrl) begin
+                            case (wr_addr_latch[3:0])
                                 4'h0: begin
                                     weight_load_start <= s_axi_wdata[0];  // WEIGHT_CTRL
                                     s_axi_bresp <= RESP_OKAY;
@@ -260,10 +275,10 @@ module axi_lite_bridge #(
                                 end
                                 default: s_axi_bresp <= RESP_SLVERR;
                             endcase
-                        end else if (addr_is_inject) begin
+                        end else if (wr_addr_is_inject) begin
                             // Spike injection buffer write
-                            // Each entry is SPIKES bits (16 bits = 2 bytes), so divide byte offset by 2
-                            spike_inject_wr_addr <= (addr_latch - ADDR_INJECT_BASE) >> 1;
+                            // AXI writes are 32-bit word-aligned, so divide byte offset by 4
+                            spike_inject_wr_addr <= (wr_addr_latch - ADDR_INJECT_BASE) >> 2;
                             spike_inject_wr_data <= s_axi_wdata[SPIKES-1:0];
                             spike_inject_wr_en <= 1'b1;
                             s_axi_bresp <= RESP_OKAY;
@@ -294,8 +309,10 @@ module axi_lite_bridge #(
             s_axi_rresp <= RESP_OKAY;
             rd_pending <= 1'b0;
             rd_wait_cnt <= 2'd0;
+            rd_addr_latch <= {AXI_ADDR_WIDTH{1'b0}};
             
             csr_rd_en <= 1'b0;
+            csr_rd_addr <= 6'd0;
             spike_collect_rd_en <= 1'b0;
             spike_collect_rd_addr <= 0;
         end else begin
@@ -312,13 +329,13 @@ module axi_lite_bridge #(
 
                 ST_RD_ADDR: begin
                     s_axi_arready <= 1'b1;
-                    addr_latch <= s_axi_araddr;
+                    rd_addr_latch <= s_axi_araddr;
                     rd_pending <= 1'b1;
                     rd_wait_cnt <= 2'd0;
                     
                     // Initiate read based on address (CSR base is 0)
                     if (s_axi_araddr <= ADDR_CSR_END) begin
-                        csr_addr <= s_axi_araddr[5:0];
+                        csr_rd_addr <= s_axi_araddr[5:0];
                         csr_rd_en <= 1'b1;
                     end else if ((s_axi_araddr >= ADDR_COLLECT_BASE) && (s_axi_araddr <= ADDR_COLLECT_END)) begin
                         // Each entry is PE_COUNT bits (128 bits = 16 bytes)
@@ -336,22 +353,22 @@ module axi_lite_bridge #(
                         s_axi_rvalid <= 1'b1;
                         
                         // Return read data based on address
-                        if (addr_is_csr) begin
+                        if (rd_addr_is_csr) begin
                             s_axi_rdata <= csr_rdata;
                             s_axi_rresp <= RESP_OKAY;
-                        end else if (addr_is_weight_ctrl) begin
-                            case (addr_latch[3:0])
+                        end else if (rd_addr_is_weight_ctrl) begin
+                            case (rd_addr_latch[3:0])
                                 4'h0: s_axi_rdata <= {31'd0, weight_load_busy};  // WEIGHT_CTRL/STATUS
                                 4'h4: s_axi_rdata <= weight_base_addr;           // WEIGHT_BASE
                                 4'h8: s_axi_rdata <= {30'd0, weight_load_busy, weight_load_done}; // WEIGHT_STATUS
                                 default: s_axi_rdata <= 32'hDEAD_BEEF;
                             endcase
                             s_axi_rresp <= RESP_OKAY;
-                        end else if (addr_is_collect) begin
+                        end else if (rd_addr_is_collect) begin
                             // Spike collection buffer read
                             // PE_COUNT=128 bits = 4 x 32-bit words per entry
-                            // Use addr_latch[3:2] to select which 32-bit slice
-                            case (addr_latch[3:2])
+                            // Use rd_addr_latch[3:2] to select which 32-bit slice
+                            case (rd_addr_latch[3:2])
                                 2'b00: s_axi_rdata <= spike_collect_rd_data[31:0];
                                 2'b01: s_axi_rdata <= spike_collect_rd_data[63:32];
                                 2'b10: s_axi_rdata <= spike_collect_rd_data[95:64];

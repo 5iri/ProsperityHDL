@@ -32,100 +32,63 @@ module top #(
     parameter REFRAC_WIDTH  = 4,      // Refractory counter width (integer cycles)
     // Timestep parameters
     parameter TIMESTEP_WIDTH = 16,    // Timestep counter width
-    parameter MAX_TIMESTEPS  = 256    // Maximum timesteps for buffers
+    parameter MAX_TIMESTEPS  = 256,   // Maximum timesteps for buffers
+    // AXI Parameters
+    parameter AXI_ADDR_WIDTH = 16,
+    parameter AXI_DATA_WIDTH = 32
 ) (
     // Clock and Reset
     input  wire clk,
     input  wire rst_n,
 
-    // Configuration and Control
-    input  wire              cfg_enable,       // Enable PPU operation
-    input  wire              cfg_auto_repeat,  // Auto-repeat tile processing
-    output wire              ppu_ready,        // PPU ready for new configuration
+    // ─────────────────── AXI4-Lite Slave Interface ──────────────────────
+    // All host access (CSR, spike injection, spike collection) via AXI
+    input  wire [AXI_ADDR_WIDTH-1:0]   s_axi_awaddr,
+    input  wire [2:0]                  s_axi_awprot,
+    input  wire                        s_axi_awvalid,
+    output wire                        s_axi_awready,
+    input  wire [AXI_DATA_WIDTH-1:0]   s_axi_wdata,
+    input  wire [AXI_DATA_WIDTH/8-1:0] s_axi_wstrb,
+    input  wire                        s_axi_wvalid,
+    output wire                        s_axi_wready,
+    output wire [1:0]                  s_axi_bresp,
+    output wire                        s_axi_bvalid,
+    input  wire                        s_axi_bready,
+    input  wire [AXI_ADDR_WIDTH-1:0]   s_axi_araddr,
+    input  wire [2:0]                  s_axi_arprot,
+    input  wire                        s_axi_arvalid,
+    output wire                        s_axi_arready,
+    output wire [AXI_DATA_WIDTH-1:0]   s_axi_rdata,
+    output wire [1:0]                  s_axi_rresp,
+    output wire                        s_axi_rvalid,
+    input  wire                        s_axi_rready,
+
+    // ─────────────────── External Weight Memory AXI Master ──────────────
+    // DMA interface for weight loading from external memory
+    output wire [31:0]                 m_axi_araddr,
+    output wire [7:0]                  m_axi_arlen,
+    output wire [2:0]                  m_axi_arsize,
+    output wire [1:0]                  m_axi_arburst,
+    output wire                        m_axi_arvalid,
+    input  wire                        m_axi_arready,
+    input  wire [31:0]                 m_axi_rdata,
+    input  wire [1:0]                  m_axi_rresp,
+    input  wire                        m_axi_rlast,
+    input  wire                        m_axi_rvalid,
+    output wire                        m_axi_rready,
+
+    // ─────────────────── Status Outputs ─────────────────────────────────
+    output wire              ppu_ready,        // PPU ready for new work
     output wire              ppu_busy,         // PPU is processing
-    
-    // Tile Control
-    input  wire              tile_start,       // Start processing tile
-    output wire              tile_done,        // Tile processing complete
-    
-    // Memory Interface - Tile Data
-    input  wire [$clog2(ROWS)-1:0] tile_mem_addr,
-    input  wire [SPIKES-1:0]       tile_mem_data_in,
-    output reg [SPIKES-1:0]       tile_mem_data_out,
-    input  wire                    tile_mem_wr_en,
-    
-    // Memory Interface - Popcounts
-    input  wire [$clog2(ROWS)-1:0] pc_mem_addr,
-    input  wire [NO_WIDTH-1:0]     pc_mem_data_in,
-    output reg [NO_WIDTH-1:0]     pc_mem_data_out,
-    input  wire                    pc_mem_wr_en,
-    
-    // Task Interface to Compute Core (internal connection to processor)
-    output wire                    task_valid,    // Valid task data
-    output wire [$clog2(ROWS)-1:0] task_row_id,   // Current row ID
-    output wire [$clog2(ROWS)-1:0] task_prefix_id, // Prefix row ID
-    output wire [SPIKES-1:0]       task_pattern,   // Spike pattern
-    
-    // Weight Memory Interface (for 128 PEs)
-    output wire [$clog2(SPIKES*PE_COUNT)-1:0] weight_addr,
-    input  wire [WEIGHT_WIDTH-1:0] weight_data,
-    output wire                      weight_rd_en,
-    
-    // Output Buffer Interface
-    output wire [$clog2(ROWS)-1:0]   output_rd_addr,
-    output wire [$clog2(ROWS)-1:0]   output_wr_addr,
-    input  wire [PE_COUNT*ACC_WIDTH-1:0] output_rd_data,
-    output wire [PE_COUNT*ACC_WIDTH-1:0] output_wr_data,
-    output wire                       output_wr_en,
+    output wire              sim_active,       // Simulation in progress
+    output wire              sim_done,         // All timesteps complete
+    output wire              weight_load_done, // Weight loading complete
+    output wire              weight_load_busy, // Weight loading in progress
+    output wire              irq,              // Interrupt request
 
-    // ─────────────────── LIF Neuron Configuration ───────────────────
-    input  wire [THRESH_WIDTH-1:0]  cfg_lif_threshold,     // Firing threshold
-    input  wire [LEAK_WIDTH-1:0]    cfg_lif_leak,          // Leak per timestep
-    input  wire [VMEM_WIDTH-1:0]    cfg_lif_reset,         // Reset potential after spike
-    input  wire [REFRAC_WIDTH-1:0]  cfg_lif_refractory,    // Refractory period
-    input  wire                     cfg_lif_enable,        // Enable LIF neuron updates
-    input  wire                     timestep_end,          // Signal end of timestep
-
-    // ─────────────────── Spike Output Interface ─────────────────────
-    output wire [PE_COUNT-1:0]      spike_out,             // Output spike vector from processor
-    output wire                     spike_valid,           // Spike output valid
-    output wire [$clog2(ROWS)-1:0]  spike_row_id,          // Row ID for current spikes
-
-    // Spike Buffer Interface
-    input  wire [$clog2(ROWS)-1:0]  spike_buf_rd_addr,     // Read address for spike buffer
-    output wire [PE_COUNT-1:0]      spike_buf_rd_data,     // Spike data at read address
-
-    // ─────────────────── Timestep Control Interface ─────────────────────
-    input  wire [TIMESTEP_WIDTH-1:0] cfg_num_timesteps,    // Number of timesteps to simulate
-    input  wire                      sim_start,            // Start multi-timestep simulation
-    output wire [TIMESTEP_WIDTH-1:0] sim_timestep_idx,     // Current timestep index
-    output wire                      sim_active,           // Simulation in progress
-    output wire                      sim_done,             // All timesteps complete
-
-    // ─────────────────── Spike Injection Interface ──────────────────────
-    input  wire                      spike_inject_wr_en,   // Write enable for input spikes
-    input  wire [$clog2(MAX_TIMESTEPS*ROWS)-1:0] spike_inject_wr_addr, // Input buffer address
-    input  wire [SPIKES-1:0]         spike_inject_wr_data, // Input spike pattern
-
-    // ─────────────────── Spike Collection Interface ─────────────────────
-    input  wire                      spike_collect_enable, // Enable output spike collection
-    input  wire                      spike_collect_clear,  // Clear output buffer
-    input  wire                      spike_collect_rd_en,  // Read enable for output spikes
-    input  wire [$clog2(MAX_TIMESTEPS*ROWS)-1:0] spike_collect_rd_addr, // Output buffer address
-    output wire [PE_COUNT-1:0]       spike_collect_rd_data,// Output spike data
-    output wire [$clog2(MAX_TIMESTEPS*ROWS):0] spike_collect_count, // Total spikes collected
-
-    // Debug: Membrane potential readback
-    input  wire [$clog2(PE_COUNT)-1:0] vmem_rd_idx,
-    output wire [VMEM_WIDTH-1:0]       vmem_rd_data,
-    
-    // Debug Signals
-    output wire [3:0]              dbg_state,      // Debug: FSM state
-    output wire                    dbg_det_ready,  // Debug: Detector ready
-    output wire                    dbg_prn_ready,  // Debug: Pruner ready
-    output wire                    dbg_dsp_ready,  // Debug: Dispatcher ready
-  output wire                    dbg_proc_busy,  // Debug: Processor busy
-  output wire                    core_ready      // Core ready signal for testbench
+    // ─────────────────── Debug Outputs ──────────────────────────────────
+    output wire [3:0]                    dbg_state,       // FSM state
+    output wire [TIMESTEP_WIDTH-1:0]    dbg_timestep     // Current timestep
 );
 
   // ===================================================================
@@ -135,6 +98,146 @@ module top #(
   // Tile memory (dual-port)
   reg [SPIKES-1:0] tile_ram [0:ROWS-1];
   reg [NO_WIDTH-1:0] popcount_ram [0:ROWS-1];
+
+  // ===================================================================
+  // AXI Bridge, CSR, Weight Memory Controller
+  // ===================================================================
+  
+  // CSR Interface signals
+  wire [5:0]  csr_addr;
+  wire [31:0] csr_wdata;
+  wire        csr_wr_en;
+  wire        csr_rd_en;
+  wire [31:0] csr_rdata;
+  wire        csr_ready;
+  
+  // CSR configuration outputs
+  wire        ctrl_start;
+  wire        ctrl_stop;
+  wire        ctrl_sw_reset;
+  wire        cfg_lif_enable;
+  wire        cfg_auto_repeat;
+  wire [TIMESTEP_WIDTH-1:0] cfg_num_timesteps;
+  wire [15:0] cfg_lif_threshold;
+  wire [15:0] cfg_lif_leak;
+  wire [15:0] cfg_lif_reset;
+  wire [3:0]  cfg_lif_refractory;
+  
+  // AXI bridge spike injection signals
+  wire        spike_inject_wr_en;
+  wire [$clog2(MAX_TIMESTEPS*ROWS)-1:0] spike_inject_wr_addr;
+  wire [SPIKES-1:0] spike_inject_wr_data;
+  
+  // AXI bridge spike collection signals  
+  wire        spike_collect_rd_en;
+  wire [$clog2(MAX_TIMESTEPS*ROWS)-1:0] spike_collect_rd_addr;
+  wire [PE_COUNT-1:0] spike_collect_rd_data;
+  
+  // Weight memory controller signals
+  wire        weight_load_start;
+  wire [31:0] weight_base_addr;
+  wire        weight_load_done_i;
+  wire        weight_load_busy_i;
+  wire [$clog2(SPIKES*PE_COUNT)-1:0] weight_wr_addr;
+  wire [WEIGHT_WIDTH-1:0] weight_wr_data;
+  wire        weight_wr_en;
+  
+  // Internal weight buffer (loaded by DMA)
+  reg [WEIGHT_WIDTH-1:0] weight_buffer [0:SPIKES*PE_COUNT-1];
+  wire [$clog2(SPIKES*PE_COUNT)-1:0] weight_rd_addr;
+  wire [WEIGHT_WIDTH-1:0] weight_rd_data;
+  assign weight_rd_data = weight_buffer[weight_rd_addr];
+  
+  // Weight buffer write from DMA
+  always @(posedge clk) begin
+    if (weight_wr_en) weight_buffer[weight_wr_addr] <= weight_wr_data;
+  end
+  
+  // Export status
+  assign weight_load_done = weight_load_done_i;
+  assign weight_load_busy = weight_load_busy_i;
+  assign dbg_timestep = timestep_idx_internal;
+
+  // ===================================================================
+  // AXI-Lite Bridge Instance
+  // ===================================================================
+  axi_lite_bridge #(
+    .AXI_ADDR_WIDTH(AXI_ADDR_WIDTH),
+    .AXI_DATA_WIDTH(AXI_DATA_WIDTH),
+    .ROWS(ROWS),
+    .PE_COUNT(PE_COUNT),
+    .SPIKES(SPIKES),
+    .TIMESTEP_WIDTH(TIMESTEP_WIDTH),
+    .MAX_TIMESTEPS(MAX_TIMESTEPS)
+  ) u_axi_bridge (
+    .clk(clk), .rst_n(rst_n),
+    .s_axi_awaddr(s_axi_awaddr), .s_axi_awprot(s_axi_awprot),
+    .s_axi_awvalid(s_axi_awvalid), .s_axi_awready(s_axi_awready),
+    .s_axi_wdata(s_axi_wdata), .s_axi_wstrb(s_axi_wstrb),
+    .s_axi_wvalid(s_axi_wvalid), .s_axi_wready(s_axi_wready),
+    .s_axi_bresp(s_axi_bresp), .s_axi_bvalid(s_axi_bvalid), .s_axi_bready(s_axi_bready),
+    .s_axi_araddr(s_axi_araddr), .s_axi_arprot(s_axi_arprot),
+    .s_axi_arvalid(s_axi_arvalid), .s_axi_arready(s_axi_arready),
+    .s_axi_rdata(s_axi_rdata), .s_axi_rresp(s_axi_rresp),
+    .s_axi_rvalid(s_axi_rvalid), .s_axi_rready(s_axi_rready),
+    .csr_addr(csr_addr), .csr_wdata(csr_wdata),
+    .csr_wr_en(csr_wr_en), .csr_rd_en(csr_rd_en),
+    .csr_rdata(csr_rdata), .csr_ready(csr_ready),
+    .spike_inject_wr_en(spike_inject_wr_en),
+    .spike_inject_wr_addr(spike_inject_wr_addr),
+    .spike_inject_wr_data(spike_inject_wr_data),
+    .spike_collect_rd_en(spike_collect_rd_en),
+    .spike_collect_rd_addr(spike_collect_rd_addr),
+    .spike_collect_rd_data(spike_collect_rd_data),
+    .weight_load_start(weight_load_start),
+    .weight_base_addr(weight_base_addr),
+    .weight_load_done(weight_load_done_i),
+    .weight_load_busy(weight_load_busy_i)
+  );
+
+  // ===================================================================
+  // CSR Register File Instance
+  // ===================================================================
+  csr #(
+    .TIMESTEP_WIDTH(TIMESTEP_WIDTH),
+    .ROWS(ROWS),
+    .MAX_TIMESTEPS(MAX_TIMESTEPS)
+  ) u_csr (
+    .clk(clk), .rst_n(rst_n),
+    .reg_addr(csr_addr), .reg_wdata(csr_wdata),
+    .reg_wr_en(csr_wr_en), .reg_rd_en(csr_rd_en),
+    .reg_rdata(csr_rdata), .reg_ready(csr_ready),
+    .ctrl_start(ctrl_start), .ctrl_stop(ctrl_stop), .ctrl_sw_reset(ctrl_sw_reset),
+    .cfg_lif_enable(cfg_lif_enable), .cfg_auto_repeat(cfg_auto_repeat),
+    .cfg_num_timesteps(cfg_num_timesteps),
+    .cfg_lif_threshold(cfg_lif_threshold), .cfg_lif_leak(cfg_lif_leak),
+    .cfg_lif_reset(cfg_lif_reset), .cfg_lif_refractory(cfg_lif_refractory),
+    .ppu_ready(ppu_ready), .ppu_busy(ppu_busy),
+    .sim_done(sim_done), .sim_active(sim_active),
+    .timestep_idx(timestep_idx_internal),
+    .spike_count(collect_spike_count),
+    .tile_done(tile_done),
+    .irq(irq)
+  );
+
+  // ===================================================================
+  // Weight Memory Controller Instance
+  // ===================================================================
+  weight_mem_ctrl #(
+    .PE_COUNT(PE_COUNT), .SPIKES(SPIKES), .WEIGHT_WIDTH(WEIGHT_WIDTH),
+    .ADDR_WIDTH(32), .DATA_WIDTH(32), .BURST_LEN(16)
+  ) u_weight_ctrl (
+    .clk(clk), .rst_n(rst_n),
+    .load_start(weight_load_start), .base_addr(weight_base_addr),
+    .load_done(weight_load_done_i), .load_busy(weight_load_busy_i),
+    .mem_araddr(m_axi_araddr), .mem_arlen(m_axi_arlen),
+    .mem_arsize(m_axi_arsize), .mem_arburst(m_axi_arburst),
+    .mem_arvalid(m_axi_arvalid), .mem_arready(m_axi_arready),
+    .mem_rdata(m_axi_rdata), .mem_rresp(m_axi_rresp),
+    .mem_rlast(m_axi_rlast), .mem_rvalid(m_axi_rvalid), .mem_rready(m_axi_rready),
+    .weight_addr(weight_wr_addr), .weight_data(weight_wr_data),
+    .weight_wr_en(weight_wr_en), .weights_loaded()
+  );
   
   // ===================================================================
   // Phase 1 Integration: Timestep Control and Spike I/O
@@ -156,6 +259,9 @@ module top #(
   wire [PE_COUNT-1:0] collect_rd_data;
   wire [$clog2(MAX_TIMESTEPS*ROWS):0] collect_spike_count;
   
+  // Internal tile_done signal
+  wire tile_done;
+  
   // Control FSM states
   localparam ST_IDLE      = 3'd0;
   localparam ST_LOAD      = 3'd1;
@@ -172,26 +278,12 @@ module top #(
   // Memory Interface
   // ===================================================================
   
-  // Tile memory read/write
+  // Tile memory write from spike injector only (no direct host access)
   always @(posedge clk) begin
-    // Host writes (configuration from software) have priority
-    if (tile_mem_wr_en) begin
-      tile_ram[tile_mem_addr] <= tile_mem_data_in;
-      // Automatically calculate and store popcount
-      popcount_ram[tile_mem_addr] <= $countones(tile_mem_data_in);
-    // Spike injector writes - mirror TCAM writes to tile_ram/popcount_ram
-    // so downstream pipeline sees the injected data
-    end else if (inject_tcam_set_en) begin
+    if (inject_tcam_set_en) begin
       tile_ram[inject_tcam_set_addr] <= inject_tcam_set_key;
       popcount_ram[inject_tcam_set_addr] <= $countones(inject_tcam_set_key);
     end
-    
-    tile_mem_data_out <= tile_ram[tile_mem_addr];
-    
-    if (pc_mem_wr_en) begin
-      popcount_ram[pc_mem_addr] <= pc_mem_data_in;
-    end
-    pc_mem_data_out <= popcount_ram[pc_mem_addr];
   end
   
   // ===================================================================
@@ -199,7 +291,7 @@ module top #(
   // ===================================================================
   
   always @(posedge clk) begin
-    if (!rst_n) begin
+    if (!rst_n || ctrl_sw_reset) begin
       state <= ST_IDLE;
       row_counter <= 0;
       processing_done <= 0;
@@ -280,15 +372,11 @@ module top #(
   assign ppu_ready = (state == ST_IDLE) || (state == ST_DONE);
   assign ppu_busy = (state != ST_IDLE) && (state != ST_DONE);
   
-  // Override tile_start with timestep controller when simulation active
-  wire tile_start_internal = sim_active ? timestep_tile_start : tile_start;
-  wire timestep_end_output = timestep_end_internal;
+  // Tile start comes from timestep controller (triggered by CSR ctrl_start)
+  wire tile_start_internal = timestep_tile_start;
   
   // Debug outputs
-  assign dbg_state = state;
-  assign dbg_det_ready = det_q_ready;
-  assign dbg_prn_ready = prn_ready;
-  assign dbg_dsp_ready = dsp_ready;
+  assign dbg_state = {1'b0, state};
   
 
   // ===================================================================
@@ -323,13 +411,13 @@ module top #(
     .row_popcnt(det_row_pc),
     .detector_init_done(detector_init_done),
     
-    // Memory interface - multiplex with spike injector only during INJECT state
-    .tile_mem_addr((state == ST_INJECT && inject_tcam_set_en) ? inject_tcam_set_addr : tile_mem_addr),
-    .tile_mem_data_in((state == ST_INJECT && inject_tcam_set_en) ? inject_tcam_set_key : tile_mem_data_in),
-    .tile_mem_wr_en((state == ST_INJECT && inject_tcam_set_en) || tile_mem_wr_en),
-    .popcount_mem_addr(tile_mem_wr_en ? tile_mem_addr : pc_mem_addr),
-    .popcount_mem_data_in(tile_mem_wr_en ? $countones(tile_mem_data_in) : pc_mem_data_in),
-    .popcount_mem_wr_en(tile_mem_wr_en | pc_mem_wr_en)
+    // Memory interface - from spike injector only
+    .tile_mem_addr(inject_tcam_set_addr),
+    .tile_mem_data_in(inject_tcam_set_key),
+    .tile_mem_wr_en(inject_tcam_set_en),
+    .popcount_mem_addr(inject_tcam_set_addr),
+    .popcount_mem_data_in($countones(inject_tcam_set_key)),
+    .popcount_mem_wr_en(inject_tcam_set_en)
   );
 
   // ===================================================================
@@ -341,11 +429,11 @@ module top #(
     .clk(clk),
     .rst_n(rst_n),
     
-    // Configuration
+    // Configuration from CSR
     .num_timesteps(cfg_num_timesteps),
     
-    // Control
-    .start(sim_start),
+    // Control from CSR
+    .start(ctrl_start),
     .tile_done(timestep_tile_done),
     
     // Status outputs
@@ -360,9 +448,6 @@ module top #(
   // Use the full tile completion (when top FSM reaches ST_DONE) for multi-timestep mode
   // This ensures both spike injection AND processing complete before next timestep
   assign timestep_tile_done = sim_active ? (state == ST_DONE) : 1'b0;
-  
-  // Export timestep index
-  assign sim_timestep_idx = timestep_idx_internal;
 
   // ===================================================================
   // Spike Injector Instance
@@ -381,7 +466,7 @@ module top #(
     .timestep_idx(timestep_idx_internal),
     .inject_done(inject_done),
     
-    // Host configuration interface
+    // Host configuration interface - from AXI bridge
     .host_wr_en(spike_inject_wr_en),
     .host_wr_addr(spike_inject_wr_addr),
     .host_wr_data(spike_inject_wr_data),
@@ -434,12 +519,12 @@ module top #(
     .mem_spike_out(/* unused */),
     .dispatch_ready(dsp_ready),
     
-    // Memory interface – multiplex spike vs NO writes
-    .mem_addr(pc_mem_wr_en ? pc_mem_addr : tile_mem_addr),
-    .mem_NO_in(pc_mem_wr_en ? pc_mem_data_in : $countones(tile_mem_data_in)),
-    .mem_spike_in(tile_mem_data_in),
-    .mem_wr_en(tile_mem_wr_en | pc_mem_wr_en),
-    .mem_sel(tile_mem_wr_en ? 1'b1 : 1'b0)  // Use 1 only while writing spikes
+    // Memory interface - driven by spike injector
+    .mem_addr(inject_tcam_set_addr),
+    .mem_NO_in($countones(inject_tcam_set_key)),
+    .mem_spike_in(inject_tcam_set_key),
+    .mem_wr_en(inject_tcam_set_en),
+    .mem_sel(1'b1)
   );
 
   // ===================================================================
@@ -526,17 +611,22 @@ module top #(
     .row_popcnt(prn_popcnt),
     .row_last(prn_row_id == ROWS - 1),
     // To Processor
-    .proc_ready(core_ready),
-    .task_valid(task_valid),
-    .task_row_id(task_row_id),
-    .task_prefix_id(task_prefix_id),
-    .task_pattern(task_pattern),
+    .proc_ready(proc_ready),
+    .task_valid(task_valid_i),
+    .task_row_id(task_row_id_i),
+    .task_prefix_id(task_prefix_id_i),
+    .task_pattern(task_pattern_i),
     // Control
     .prev_compute_busy(1'b0),
     .pruner_done(prune_done),
     .tile_done(dsp_tile_done)
   );
-  // Only one dispatcher instance above. Any other instance below this comment will be removed.
+  
+  // Internal task signals
+  wire task_valid_i;
+  wire [$clog2(ROWS)-1:0] task_row_id_i;
+  wire [$clog2(ROWS)-1:0] task_prefix_id_i;
+  wire [SPIKES-1:0] task_pattern_i;
   
   // ===================================================================
   // Processor Interface (128 PEs with Integrated LIF Neurons)
@@ -546,6 +636,10 @@ module top #(
   wire proc_done;
   wire [PE_COUNT-1:0] proc_spike_out;
   wire proc_spike_valid;
+  wire [$clog2(ROWS)-1:0] output_rd_addr_i;
+  wire [$clog2(ROWS)-1:0] output_wr_addr_i;
+  wire [PE_COUNT*ACC_WIDTH-1:0] output_wr_data_i;
+  wire output_wr_en_i;
   
   // Processor instance
   processor #(
@@ -564,49 +658,46 @@ module top #(
     .rst_n(rst_n),
     
     // Task Interface from Dispatcher
-    .task_valid(task_valid),
+    .task_valid(task_valid_i),
     .task_ready(proc_ready),
-    .task_row_id(task_row_id),
-    .task_prefix_id(task_prefix_id),
-    .task_pattern(task_pattern),
+    .task_row_id(task_row_id_i),
+    .task_prefix_id(task_prefix_id_i),
+    .task_pattern(task_pattern_i),
     
-    // Weight Memory Interface
-    .weight_addr(weight_addr),
-    .weight_data(weight_data),
-    .weight_rd_en(weight_rd_en),
+    // Weight Memory Interface - use internal DMA-loaded buffer
+    .weight_addr(weight_rd_addr),
+    .weight_data(weight_rd_data),
+    .weight_rd_en(),
     
     // Output Buffer Interface
-    .output_rd_addr(output_rd_addr),
-    .output_wr_addr(output_wr_addr),
-    .output_rd_data(output_rd_data),
-    .output_wr_data(output_wr_data),
-    .output_wr_en(output_wr_en),
+    .output_rd_addr(output_rd_addr_i),
+    .output_wr_addr(output_wr_addr_i),
+    .output_rd_data({PE_COUNT*ACC_WIDTH{1'b0}}),
+    .output_wr_data(output_wr_data_i),
+    .output_wr_en(output_wr_en_i),
 
-    // LIF Neuron Configuration
+    // LIF Neuron Configuration - from CSR
     .cfg_threshold(cfg_lif_threshold),
     .cfg_leak(cfg_lif_leak),
     .cfg_reset_potential(cfg_lif_reset),
     .cfg_refractory(cfg_lif_refractory),
 
-    // LIF Control
+    // LIF Control - from CSR
     .lif_enable(cfg_lif_enable),
-    .timestep_end(sim_active ? timestep_end_internal : timestep_end),
+    .timestep_end(timestep_end_internal),
 
     // Spike Output
     .spike_out(proc_spike_out),
     .spike_valid(proc_spike_valid),
 
     // Debug: Membrane readback
-    .vmem_rd_idx(vmem_rd_idx),
-    .vmem_rd_data(vmem_rd_data),
+    .vmem_rd_idx(7'd0),
+    .vmem_rd_data(),
     
     // Status
     .proc_busy(proc_busy),
     .proc_done(proc_done)
   );
-  
-  // Connect processor ready signal to dispatcher
-  assign core_ready = proc_ready;
 
   // ===================================================================
   // Spike Collector Instance
@@ -623,14 +714,14 @@ module top #(
     // Spike input interface (from processor)
     .spike_in(proc_spike_out),
     .spike_valid(proc_spike_valid),
-    .spike_row_id(output_wr_addr),  // Use output write address as row ID
+    .spike_row_id(output_wr_addr_i),
     .timestep_idx(timestep_idx_internal),
     
     // Control
-    .collect_enable(spike_collect_enable),
-    .clear_buffer(spike_collect_clear),
+    .collect_enable(1'b1),
+    .clear_buffer(ctrl_sw_reset),
     
-    // Host read interface
+    // Host read interface - from AXI bridge
     .host_rd_en(spike_collect_rd_en),
     .host_rd_addr(spike_collect_rd_addr),
     .host_rd_data(collect_rd_data),
@@ -641,54 +732,9 @@ module top #(
   
   // Export spike collector outputs
   assign spike_collect_rd_data = collect_rd_data;
-  assign spike_collect_count = collect_spike_count;
-
-  // ===================================================================
-  // Spike Buffer - Store spikes per row for next layer / host readback
-  // ===================================================================
-  reg [PE_COUNT-1:0] spike_buffer [0:ROWS-1];
-  reg [$clog2(ROWS)-1:0] spike_row_id_r;
-
-  // Write spikes to buffer when processor outputs valid spikes
-  always @(posedge clk) begin
-    if (!rst_n) begin
-      spike_row_id_r <= 0;
-    end else if (proc_spike_valid && output_wr_en) begin
-      spike_buffer[output_wr_addr] <= proc_spike_out;
-      spike_row_id_r <= output_wr_addr;
-    end
-  end
-
-  // Spike output signals
-  assign spike_out = proc_spike_out;
-  assign spike_valid = proc_spike_valid;
-  assign spike_row_id = spike_row_id_r;
-  assign spike_buf_rd_data = spike_buffer[spike_buf_rd_addr];
   
-  // Status outputs
+  // tile_done from dispatcher
   assign tile_done = dsp_tile_done;
-  assign ppu_ready = (state == ST_IDLE) || (state == ST_DONE);
-
-  // Debug outputs
-  assign dbg_state = state;
-  assign dbg_det_ready = det_q_ready;
-  assign dbg_prn_ready = prn_ready;
-  assign dbg_dsp_ready = dsp_ready;
-  assign dbg_proc_busy = proc_busy;
-
-  // ─────────────────── Single-port RAM interface for tile_data ---------
-  always @(posedge clk) begin
-    if (tile_mem_wr_en) begin
-      tile_ram[tile_mem_addr] <= tile_mem_data_in;
-    end
-  end
-  
-  // Popcount memory
-  always @(posedge clk) begin
-    if (pc_mem_wr_en) begin
-      popcount_ram[pc_mem_addr] <= pc_mem_data_in;
-    end
-  end
 
   // ===================================================================
   // Helper Functions

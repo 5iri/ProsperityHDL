@@ -333,13 +333,46 @@ module processor #(
                                          {($clog2(SPIKES*PE_COUNT)){1'b0}}; // Not used during computation
     assign weight_rd_en = weight_loading; // Only read during weight loading, not during computation
     
-    // Register incoming weight data to avoid race conditions with combinational memory
+    // Weight loading pipeline:
+    // Cycle 0: weight_loading=1, address 0 generated (combinational), weight_rd_en=1
+    // Cycle 1: Testbench sees weight_rd_en, provides weight_data for addr 0
+    //          weight_data_reg captures (garbage on first cycle)
+    //          weight_pipe_idx captures current load_idx (0,0)
+    //          load_idx increments to (0,1)
+    // Cycle 2: weight_data_reg has weight[0][0]
+    //          weight_store_idx captures weight_pipe_idx (0,0)
+    //          weight_pipe_idx captures load_idx (0,1)
+    //          Store weight_data_reg to buffer[0][0] - CORRECT!
+    
+    // Two-stage pipeline for indices to match data register delay
+    reg [$clog2(PE_COUNT)-1:0] weight_pipe_pe_idx;
+    reg [$clog2(SPIKES)-1:0] weight_pipe_spike_idx;
+    reg weight_pipe_valid;
+    
+    // Two-stage pipeline for data to match 2-stage index pipeline
+    // Required for 1-cycle memory latency (typical DMA behavior):
+    //   Cycle N: Request addr A
+    //   Cycle N+1: Memory provides W_A, captured into weight_data_reg
+    //   Cycle N+2: weight_data_reg2 gets W_A, store indices ready
+    //              Store: weight_buffer[A] <= weight_data_reg2 (W_A)
     reg [WEIGHT_WIDTH-1:0] weight_data_reg;
+    reg [WEIGHT_WIDTH-1:0] weight_data_reg2;
     always @(posedge clk) begin
-        if (!rst_n)
+        if (!rst_n) begin
             weight_data_reg <= {WEIGHT_WIDTH{1'b0}};
-        else
+            weight_data_reg2 <= {WEIGHT_WIDTH{1'b0}};
+            weight_pipe_pe_idx <= 0;
+            weight_pipe_spike_idx <= 0;
+            weight_pipe_valid <= 1'b0;
+        end else begin
+            // Pipeline stage 1: capture incoming data and current load indices
             weight_data_reg <= weight_data;
+            weight_pipe_pe_idx <= weight_load_pe_idx;
+            weight_pipe_spike_idx <= weight_load_spike_idx;
+            weight_pipe_valid <= weight_loading;
+            // Pipeline stage 2 for data (indices stage 2 is in weight loading logic)
+            weight_data_reg2 <= weight_data_reg;
+        end
     end
     
     // Weight loading logic
@@ -354,30 +387,18 @@ module processor #(
             weight_store_valid <= 1'b0;
 
         end else if (state == ST_LOAD_WEIGHTS) begin
-            // Store registered weight data using single-cycle delayed indices
-            // Pipeline: load_idx -> store_idx (used with weight_data_reg)
-            // Both data and indices delayed by exactly 1 cycle
-            // Store happens outside the guard so final weight commits after weights_loaded=1
+            // Pipeline stage 2: capture pipe indices, aligned with weight_data_reg
+            weight_store_pe_idx <= weight_pipe_pe_idx;
+            weight_store_spike_idx <= weight_pipe_spike_idx;
+            weight_store_valid <= weight_pipe_valid;
+            
+            // Store registered weight data using double-delayed indices
             if (weight_store_valid) begin
-                // Use weight_data directly - it's already synchronous from the test
-                weight_buffer[weight_store_pe_idx][weight_store_spike_idx] <= weight_data;
+                weight_buffer[weight_store_pe_idx][weight_store_spike_idx] <= weight_data_reg;
             end
             
             if (!weights_loaded) begin
-                // Single-stage pipeline for indices to match the data register delay
-                // Copy indices BEFORE incrementing so we store to the correct location
-                // Store valid needs to be delayed by 2 cycles: 1 for memory read, 1 for weight_data_reg
-                weight_store_pe_idx <= weight_load_pe_idx;
-                weight_store_spike_idx <= weight_load_spike_idx;
-                // Only set valid after weight_data_reg has captured data (2 cycles after start)
-                if (weight_store_valid) begin
-                    weight_store_valid <= 1'b1;  // Keep it high
-                end else if (weight_loading) begin
-                    weight_store_valid <= 1'b1;  // Become valid 1 cycle after weight_loading starts
-                end
-                
                 // Increment load indices for next address generation
-                // Only increment after first cycle (when weight_loading is already 1)
                 if (weight_loading) begin
                     if (weight_load_spike_idx == ($clog2(SPIKES))'(SPIKES-1)) begin
                         weight_load_spike_idx <= 0;
@@ -395,9 +416,6 @@ module processor #(
                     // First cycle: just set loading flag, don't increment yet
                     weight_loading <= 1'b1;
                 end
-            end else begin
-                // After loading complete, clear the valid flag
-                weight_store_valid <= 1'b0;
             end
         end
     end

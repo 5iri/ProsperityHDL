@@ -83,7 +83,9 @@ Notes:
 
 ## Roadmap: Prototype → Full SNN Accelerator
 
-> **Goal:** Build a working FPGA prototype that can run small SNN benchmarks (e.g., MNIST on LeNet-5 SNN) end-to-end, demonstrating product sparsity benefits.
+> **Targets:**
+> 1. **Real FPGA Deployment** — Working prototype on FPGA dev board with host software stack
+> 2. **ASIC Tapeout Results** — Synthesis reports from standard cell libraries (e.g., TSMC 28nm, SkyWater 130nm) for area/power/timing characterization
 
 ### Current State (Prototype Core)
 
@@ -136,26 +138,21 @@ All memory and host interface components are merged and tested:
 
 ### Upcoming Components (Prioritized)
 
-#### Phase 3 — Scalability
+#### Phase 3 — Scalability & Multi-Tile
 
 | # | Component | Description | Effort |
 |---|-----------|-------------|--------|
 | 8 | **Multi-Tile Router / NoC stub** | Simple packet-based inter-tile routing for larger networks | High |
 | 9 | **Tile Mapper (software)** | Python tool: layer → tile assignment, weight layout generation | Medium |
 
-#### Phase 4 — Learning (Optional / Research)
+#### Phase 4 — Verification, Tooling & Deployment
 
 | # | Component | Description | Effort |
 |---|-----------|-------------|--------|
-| 10 | **STDP / Weight Update Path** | Spike-timing-dependent plasticity or host-driven weight update | High |
-
-#### Phase 5 — Verification & Tooling
-
-| # | Component | Description | Effort |
-|---|-----------|-------------|--------|
-| 11 | **End-to-end testbench** | Load an SNN, run N timesteps, compare to golden spikes | Medium |
-| 12 | **Performance counters** | Cycle, spike, and stall counters for profiling | Low |
-| 13 | **FPGA constraints / build** | Pin mapping, clock constraints for target board | Low |
+| 10 | **End-to-end testbench** | Load an SNN, run N timesteps, compare to golden spikes | Medium |
+| 11 | **Performance counters** | Cycle, spike, and stall counters for profiling | Low |
+| 12 | **FPGA constraints / build** | Pin mapping, clock constraints for target board (Xilinx/Intel) | Medium |
+| 13 | **ASIC synthesis scripts** | Synopsys DC / OpenROAD scripts for area/power/timing reports | Medium |
 
 ---
 
@@ -173,14 +170,16 @@ Week 3:   Phase 2 (Memory + Host)  ← ✅ Completed 2026-01-01
     └── Weight memory controller (ppu/weight_mem_ctrl.v)
     └── cocotb tests for all Phase 2 modules
 
-Week 4:   Phase 3 (Scaling)
+Week 4:   Phase 3 (Scaling & Multi-Tile)
     └── Multi-tile loopback test
-    └── Simple NoC stub
-    └── Python mapper skeleton
+    └── Simple NoC stub for inter-tile routing
+    └── Python tile mapper skeleton
 
-Week 5+:  Phase 4–5 (Learning + Polish)
-    └── STDP hooks (optional)
-    └── Perf counters, FPGA build, docs
+Week 5–6: Phase 4 (Verification & Deployment)
+    └── End-to-end SNN testbench (LeNet-5 on MNIST)
+    └── Performance counters integration
+    └── FPGA build (Xilinx Vivado / Intel Quartus)
+    └── ASIC synthesis scripts (Synopsys DC / OpenROAD)
 ```
 
 ---
@@ -189,10 +188,11 @@ Week 5+:  Phase 4–5 (Learning + Polish)
 
 | Milestone | Description | Target |
 |-----------|-------------|--------|
-| **M1: Simulation MVP** | Single-tile LeNet-5 layer runs in Verilator, matches golden output | Week 2 |
-| **M2: FPGA Bringup** | Design runs on FPGA dev board with UART/JTAG control | Week 3 |
-| **M3: Full Network** | Complete LeNet-5 MNIST inference on FPGA, measure latency/energy | Week 4 |
-| **M4: Benchmarking** | Compare vs. dense baseline, publish sparsity speedup numbers | Week 5 |
+| **M1: Simulation MVP** | Single-tile LeNet-5 layer runs in Verilator, matches golden output | Week 2 ✅ |
+| **M2: Multi-Tile Sim** | Two-tile network with NoC routing passes cocotb tests | Week 4 |
+| **M3: FPGA Bringup** | Design runs on FPGA dev board with AXI host control | Week 5 |
+| **M4: ASIC Synthesis** | Area/power/timing reports from standard cell library (SkyWater 130nm or TSMC 28nm) | Week 6 |
+| **M5: Full Benchmark** | Complete LeNet-5 MNIST inference, publish sparsity speedup vs. dense baseline | Week 6 |
 
 ---
 
